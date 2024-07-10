@@ -1,0 +1,3 @@
+[submodule "Aurora-SDK"]
+	path = Aurora-SDK
+	url = https://github.com/qu-bit-electronix/Aurora-SDK
