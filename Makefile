@@ -25,8 +25,8 @@ DAISYSP_DIR = $(AURORA_SDK_PATH)/libs/DaisySP/
 # 4. Navigate and run the "Cortex Debug" Run and Debug configuration
 #    or simply press F5 in VS Code.
 
-# DEBUG = 1
-# OPT = -O0
+#DEBUG = 1
+OPT = -O3
 
 # Core location, and generic Makefile.
 SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
