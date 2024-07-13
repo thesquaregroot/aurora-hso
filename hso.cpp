@@ -71,19 +71,18 @@ Buffer rightSignal; // input signal for right channel
 
 Math<dft_t> math;
 ShyFFT<dft_t, DFT_SIZE> dft;
+dft_t window[DFT_SIZE];
 dft_t signalBuffer[DFT_SIZE];
 dft_t spectrumBuffer[DFT_SIZE];
 dft_t processedSpectrumBuffer[DFT_SIZE];
 
 dft_t indexPhase(size_t index) { return index / (dft_t)(DFT_SIZE-1); }
 
-dft_t window(dft_t phase) {
-	return 0.5 * (1 - cos(2 * math.pi() * phase)); // hann
-}
+dft_t hann(dft_t phase) { return 0.5 * (1 - cos(2 * math.pi() * phase)); }
 
-dft_t* processSignal(const Buffer& buffer, float baseFrequency, float strideFactor, float levelFactor) {
+void processSignal(const Buffer& buffer, float baseFrequency, float strideFactor, float levelFactor) {
 	for (int i = 0; i < DFT_SIZE; i++) {
-		signalBuffer[i] = buffer[i] * window(indexPhase(i));
+		signalBuffer[i] = buffer[i] * window[i];
 	}
 	dft.Direct(signalBuffer, spectrumBuffer);
 
@@ -106,13 +105,10 @@ dft_t* processSignal(const Buffer& buffer, float baseFrequency, float strideFact
 	}
 
 	dft.Inverse(processedSpectrumBuffer, signalBuffer);
-	return signalBuffer;
 }
 
 dft_t limit(dft_t value) {
-	//value = fclamp(value, -1.0, 1.0);
-	//TestFloat(value);
-	return value;
+	return SoftClip(value);
 }
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size) {
@@ -128,23 +124,26 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	float fmFactor = pow(2, fmDepth * hw.GetWarpVoct() / 10.0); // -2^6 to 2^6
 	frequency = fclamp(frequency * fmFactor, 20, 16000);
 
-	float strideFactor = fmap(hw.GetKnobValue(KNOB_REFLECT), 0.0, 5.0, Mapping::LINEAR);
-	float levelFactor = fmap(hw.GetKnobValue(KNOB_ATMOSPHERE), 0.0, 1.0, Mapping::LINEAR);
+	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT);
+	float strideFactor = fmap(rawStride, 0.0, 5.0, Mapping::LINEAR);
+
+	float rawLevel = hw.GetKnobValue(KNOB_ATMOSPHERE) + hw.GetCvValue(CV_ATMOSPHERE);
+	float levelFactor = fmap(rawLevel, 0.0, 1.0, Mapping::LOG);
 
 	float mix = hw.GetKnobValue(KNOB_MIX);
 
 	// process left channel
-	dft_t* output = processSignal(leftSignal, frequency, strideFactor, levelFactor);
+	processSignal(leftSignal, frequency, strideFactor, levelFactor);
 	for (size_t i = 0; i < size; i++) {
 		size_t index = DFT_SIZE/2 - size/2 + i; // read from center of processed signal
-		dft_t value = output[index] / DFT_SIZE / window(indexPhase(index)); // correct for DFT and window amplitude
+		dft_t value = signalBuffer[index] / DFT_SIZE / window[index]; // correct for DFT and window amplitude
 		out[0][i] = (leftSignal[index] * (1.f - mix)) + (limit(value) * mix);
 	}
 	// process right channel
-	output = processSignal(rightSignal, frequency, strideFactor, levelFactor);
+	processSignal(rightSignal, frequency, strideFactor, levelFactor);
 	for (size_t i = 0; i < size; i++) {
 		size_t index = DFT_SIZE/2 - size/2 + i; // read from center of processed signal
-		dft_t value = output[index] / DFT_SIZE / window(indexPhase(index)); // correct for DFT and window amplitude
+		dft_t value = signalBuffer[index] / DFT_SIZE / window[index]; // correct for DFT and window amplitude
 		out[1][i] = (rightSignal[index] * (1.f - mix)) + (limit(value) * mix);
 	}
 }
@@ -152,6 +151,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 int main(void) {
 	dft.Init();
 	hw.Init();
+
+	for (size_t i = 0; i < DFT_SIZE; i++) {
+		window[i] = hann(indexPhase(i));
+	}
 
 	hw.SetAudioBlockSize(1024);
 	hw.StartAudio(AudioCallback);
