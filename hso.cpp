@@ -24,6 +24,7 @@ using namespace daisysp;
 
 #define DFT_SIZE 4096
 #define OSCILLATOR_COUNT 4
+#define OUTPUT_BLEND_SAMPLES 4
 #define RANDOM_SAMPLE_COUNT 128
 #define FREQUENCY_INCREMENT_MIN 20
 #define FREQUENCY_MIN 20
@@ -97,26 +98,37 @@ bool isFreezeInverted = false; // flips gate interpretation, changed by user inp
 
 Buffer leftSignal; // input signal for left channel
 Buffer rightSignal; // input signal for right channel
-Buffer leftOuts; // output signal for left channel (used for LEDs)
-Buffer rightOuts; // output signal for right channel (used for LEDs)
+Buffer leftOuts; // output memory for left channel
+Buffer rightOuts; // output memory for right channel
+int freezeOffset = 0;
 
 Math<dft_t> math;
 ShyFFT<dft_t, DFT_SIZE> dft;
 dft_t* window = new dft_t[DFT_SIZE];
-dft_t* signalBuffer = new dft_t[DFT_SIZE];
-dft_t* spectrumBuffer = new dft_t[DFT_SIZE];
-dft_t* processedSpectrumBuffer = new dft_t[DFT_SIZE];
+dft_t* signalBuffer = new dft_t[2*DFT_SIZE];
+dft_t* spectrumBuffer = new dft_t[2*DFT_SIZE];
+dft_t* processedSpectrumBuffer = new dft_t[2*DFT_SIZE];
 
 dft_t indexPhase(size_t index) { return index / (dft_t)(DFT_SIZE-1); }
 dft_t hann(dft_t phase) { return 0.5 * (1 - cos(2 * math.pi() * phase)); }
 
-void processSignal(const Buffer& signal, float baseFrequency, float strideFactor, float levelFactor, float resonance) {
-	for (int i = 0; i < DFT_SIZE; i++) {
-		signalBuffer[i] = signal[i] * window[i];
+void processSignals(float baseFrequency, float strideFactor, float levelFactor, float resonance) {
+	dft_t* leftSpectrum = spectrumBuffer;
+	dft_t* rightSpectrum = spectrumBuffer+DFT_SIZE;
+	if (!isFreezeActive) {
+		// re-compute spectrum
+		for (int i = 0; i < DFT_SIZE; i++) {
+			signalBuffer[i] = leftSignal[i] * window[i];
+			signalBuffer[DFT_SIZE + i] = rightSignal[i] * window[i];
+		}
+		dft.Direct(signalBuffer, spectrumBuffer);
+		dft.Direct(signalBuffer+DFT_SIZE, spectrumBuffer+DFT_SIZE);
 	}
-	dft.Direct(signalBuffer, spectrumBuffer);
 
-	memset(processedSpectrumBuffer, 0, sizeof(dft_t)*DFT_SIZE);
+	memset(processedSpectrumBuffer, 0, sizeof(dft_t)*2*DFT_SIZE);
+	dft_t* leftProcessed = processedSpectrumBuffer;
+	dft_t* rightProcessed = processedSpectrumBuffer+DFT_SIZE;
+
 	float nyquistLimit = hw.AudioSampleRate()/2.0;
 	double frequency = baseFrequency;
 	float level = 1.0 + resonance;
@@ -127,8 +139,10 @@ void processSignal(const Buffer& signal, float baseFrequency, float strideFactor
 		size_t bin2 = BIN_COUNT + bin1;
 		int effectWidth = 1 + fclamp(fastlog10f(frequency)-2, 0.0, 5.0);
 		for (int i = -effectWidth/2; i <= effectWidth/2; i++) {
-			processedSpectrumBuffer[bin1 + i] += level * spectrumBuffer[bin1 + i] * BIN_AMPLITUDE_RECIP; // real part
-			processedSpectrumBuffer[bin2 + i] += level * spectrumBuffer[bin2 + i] * BIN_AMPLITUDE_RECIP; // imaginary part
+			leftProcessed[bin1 + i] += level * leftSpectrum[bin1 + i] * BIN_AMPLITUDE_RECIP; // real part
+			leftProcessed[bin2 + i] += level * leftSpectrum[bin2 + i] * BIN_AMPLITUDE_RECIP; // imaginary part
+			rightProcessed[bin1 + i] += level * rightSpectrum[bin1 + i] * BIN_AMPLITUDE_RECIP; // real part
+			rightProcessed[bin2 + i] += level * rightSpectrum[bin2 + i] * BIN_AMPLITUDE_RECIP; // imaginary part
 		}
 		// updates for next iteration
 		lastBin = bin1;
@@ -136,7 +150,8 @@ void processSignal(const Buffer& signal, float baseFrequency, float strideFactor
 		level *= levelFactor;
 	}
 
-	dft.Inverse(processedSpectrumBuffer, signalBuffer);
+	dft.Inverse(leftProcessed, signalBuffer);
+	dft.Inverse(rightProcessed, signalBuffer+DFT_SIZE);
 }
 
 dft_t limit(dft_t value) {
@@ -147,9 +162,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	hw.ProcessAllControls();
 
 	reverseButton.Debounce();
-	if (reverseButton.RisingEdge()) isReverseInverted = !isReverseInverted;
+	if (reverseButton.RisingEdge()) {
+		isReverseInverted = !isReverseInverted;
+	}
 	freezeButton.Debounce();
-	if (freezeButton.RisingEdge()) isFreezeInverted = !isFreezeInverted;
+	if (freezeButton.RisingEdge()) {
+		isFreezeInverted = !isFreezeInverted;
+		freezeOffset = 0;
+	}
 
 	bool reverseGateState = hw.GetGateState(GATE_REVERSE);
 	bool freezeGateState = hw.GetGateState(GATE_FREEZE);
@@ -219,21 +239,27 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 	}
 
-	// process left channel
-	processSignal(leftSignal, baseFrequency, strideFactor, levelFactor, resonance);
+	// calculate output
+	processSignals(baseFrequency, strideFactor, levelFactor, resonance);
 	for (size_t i = 0; i < size; i++) {
 		size_t index = DFT_SIZE/2 - size/2 + i; // read from center of processed signal
-		dft_t value = limit(signalBuffer[index] + leftResonance[i]);
-		out[0][i] = (leftSignal[index] * (1.f - mix)) + (value * mix);
+		size_t freezeIndex = (index + freezeOffset) % DFT_SIZE; // rotate through signal when frozen
+		// left channel
+		dft_t leftValue = limit(signalBuffer[freezeIndex] + leftResonance[i]);
+		dft_t rightValue = limit(signalBuffer[DFT_SIZE+freezeIndex] + rightResonance[i]);
+		if (i < OUTPUT_BLEND_SAMPLES) {
+			// blend previous output value to increasing degree
+			float blend = (i+1.f)/OUTPUT_BLEND_SAMPLES;
+			leftValue = lerp(leftOuts[DFT_SIZE-1], leftValue, blend);
+			rightValue = lerp(rightOuts[DFT_SIZE-1], rightValue, blend);
+		}
+		out[0][i] = (leftSignal[index] * (1.f - mix)) + (leftValue * mix);
+		out[1][i] = (rightSignal[index] * (1.f - mix)) + (rightValue * mix);
 		leftOuts.put(out[0][i]);
-	}
-	// process right channel
-	processSignal(rightSignal, baseFrequency, strideFactor, levelFactor, resonance);
-	for (size_t i = 0; i < size; i++) {
-		size_t index = DFT_SIZE/2 - size/2 + i; // read from center of processed signal
-		dft_t value = limit(signalBuffer[index] + rightResonance[i]);
-		out[1][i] = (rightSignal[index] * (1.f - mix)) + (value * mix);
 		rightOuts.put(out[1][i]);
+	}
+	if (isFreezeActive) {
+		freezeOffset += size;
 	}
 }
 
