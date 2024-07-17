@@ -88,6 +88,12 @@ inline float lerp(float a, float b, float t) {
 Hardware hw;
 Oscillator leftOscillators[OSCILLATOR_COUNT];
 Oscillator rightOscillators[OSCILLATOR_COUNT];
+Switch reverseButton;
+bool isReverseActive = false;
+bool isReverseInverted = false; // flips gate interpretation, changed by user input
+Switch freezeButton;
+bool isFreezeActive = false;
+bool isFreezeInverted = false; // flips gate interpretation, changed by user input
 
 Buffer leftSignal; // input signal for left channel
 Buffer rightSignal; // input signal for right channel
@@ -119,15 +125,11 @@ void processSignal(const Buffer& signal, float baseFrequency, float strideFactor
 		size_t bin1 = frequency / nyquistLimit * BIN_COUNT;
 		if (bin1 == lastBin || level == 0) break; // can happen when stride or level is small
 		size_t bin2 = BIN_COUNT + bin1;
-		// include adjacent bins (at lower levels) as freqency increases
 		int effectWidth = 1 + fclamp(fastlog10f(frequency)-2, 0.0, 5.0);
 		for (int i = -effectWidth/2; i <= effectWidth/2; i++) {
-			dft_t subLevel = (effectWidth - abs(i)) / (dft_t)effectWidth;
-			processedSpectrumBuffer[bin1] += level * subLevel * spectrumBuffer[bin1 + i] * BIN_AMPLITUDE_RECIP; // real part
-			processedSpectrumBuffer[bin2] += level * subLevel * spectrumBuffer[bin2 + i] * BIN_AMPLITUDE_RECIP; // imaginary part
+			processedSpectrumBuffer[bin1 + i] += level * spectrumBuffer[bin1 + i] * BIN_AMPLITUDE_RECIP; // real part
+			processedSpectrumBuffer[bin2 + i] += level * spectrumBuffer[bin2 + i] * BIN_AMPLITUDE_RECIP; // imaginary part
 		}
-		//processedSpectrumBuffer[bin1] += level * spectrumBuffer[bin1] * BIN_AMPLITUDE_RECIP; // real part
-		//processedSpectrumBuffer[bin2] += level * spectrumBuffer[bin2] * BIN_AMPLITUDE_RECIP; // imaginary part
 		// updates for next iteration
 		lastBin = bin1;
 		frequency += frequency * strideFactor;
@@ -143,6 +145,16 @@ dft_t limit(dft_t value) {
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size) {
 	hw.ProcessAllControls();
+
+	reverseButton.Debounce();
+	if (reverseButton.RisingEdge()) isReverseInverted = !isReverseInverted;
+	freezeButton.Debounce();
+	if (freezeButton.RisingEdge()) isFreezeInverted = !isFreezeInverted;
+
+	bool reverseGateState = hw.GetGateState(GATE_REVERSE);
+	bool freezeGateState = hw.GetGateState(GATE_FREEZE);
+	isReverseActive = isReverseInverted ? !reverseGateState : reverseGateState;
+	isFreezeActive = isFreezeInverted ? !freezeGateState : freezeGateState;
 
 	for (size_t i = 0; i < size; i++) {
 		leftSignal.put(in[0][i]);
@@ -249,6 +261,13 @@ int main(void) {
 		_initOsc(rightOscillators[i], true); // cosines
 	}
 
+	reverseButton = hw.GetButton(SW_REVERSE);
+	freezeButton = hw.GetButton(SW_FREEZE);
+	Color colorWhite;
+	colorWhite.Init(Color::WHITE);
+	Color colorOff;
+	colorOff.Init(Color::OFF);
+
 	hw.StartAudio(AudioCallback);
 
 	/** Infinite Loop */
@@ -272,6 +291,8 @@ int main(void) {
 		float leftMid = (leftInAvg + leftOutAvg) / 2;
 		float rightMid = (rightInAvg + rightOutAvg) / 2;
 		// set leds
+		hw.SetLed(LED_REVERSE, isReverseActive ? colorWhite : colorOff);
+		hw.SetLed(LED_FREEZE, isFreezeActive ? colorWhite : colorOff);
 		hw.SetLed(LED_1, leftInAvg, 0.0, 0.0); // red
 		hw.SetLed(LED_2, 0.0, leftMid, 0.0); // green
 		hw.SetLed(LED_3, 0.5*leftOutAvg, 0.0, leftOutAvg); // purple
