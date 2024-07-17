@@ -26,7 +26,6 @@ using namespace daisysp;
 #define OSCILLATOR_COUNT 4
 #define OUTPUT_BLEND_SAMPLES 4
 #define RANDOM_SAMPLE_COUNT 128
-#define FREQUENCY_INCREMENT_MIN 20
 #define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
 #define HARMONIC_MAX 20000
@@ -137,13 +136,11 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		size_t bin1 = frequency / nyquistLimit * BIN_COUNT;
 		if (bin1 == lastBin || level == 0) break; // can happen when stride or level is small
 		size_t bin2 = BIN_COUNT + bin1;
-		int effectWidth = 1 + fclamp(fastlog10f(frequency)-2, 0.0, 5.0);
-		for (int i = -effectWidth/2; i <= effectWidth/2; i++) {
-			leftProcessed[bin1 + i] += level * leftSpectrum[bin1 + i] * BIN_AMPLITUDE_RECIP; // real part
-			leftProcessed[bin2 + i] += level * leftSpectrum[bin2 + i] * BIN_AMPLITUDE_RECIP; // imaginary part
-			rightProcessed[bin1 + i] += level * rightSpectrum[bin1 + i] * BIN_AMPLITUDE_RECIP; // real part
-			rightProcessed[bin2 + i] += level * rightSpectrum[bin2 + i] * BIN_AMPLITUDE_RECIP; // imaginary part
-		}
+		// transfer harmonic bin levels to processed spectrum
+		leftProcessed[bin1] = level * leftSpectrum[bin1] * BIN_AMPLITUDE_RECIP; // real part
+		leftProcessed[bin2] = level * leftSpectrum[bin2] * BIN_AMPLITUDE_RECIP; // imaginary part
+		rightProcessed[bin1] = level * rightSpectrum[bin1] * BIN_AMPLITUDE_RECIP; // real part
+		rightProcessed[bin2] = level * rightSpectrum[bin2] * BIN_AMPLITUDE_RECIP; // imaginary part
 		// updates for next iteration
 		lastBin = bin1;
 		frequency += frequency * strideFactor;
@@ -218,25 +215,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			leftResonance[j] += level * l.Process();
 			rightResonance[j] += level * r.Process();
 		}
-		float freqIncrement = freq * strideFactor;
-		freq += freqIncrement;
-		if (freqIncrement < FREQUENCY_INCREMENT_MIN) {
-			// as frequency approaches previous frequency, force level decrease
-			float l = lerp(0.0, levelFactor, (freqIncrement - FREQUENCY_INCREMENT_MIN)/FREQUENCY_INCREMENT_MIN);
-			level *= fclamp(l, 0.0, levelFactor);
-		}
-		else if (freq > HARMONIC_MAX) {
-			// next harmonic would be outside of safe range
-			level = 0.0;
-		}
-		else if (freq > FREQUENCY_MAX) {
-			// drop harmonic level to zero as frequency approaches upper limit
-			float l = lerp(levelFactor, 0.0, (freq - FREQUENCY_MAX)/(HARMONIC_MAX - FREQUENCY_MAX));
-			level *= fclamp(l, 0.0, levelFactor);
-		}
-		else {
-			level *= levelFactor;
-		}
+		freq += freq * strideFactor;
+		// once above freqeuncy max, drop level to zero (at harmonic max)
+		float harmonicLevelFactor = lerp(levelFactor, 0.0, (freq - FREQUENCY_MAX)/(HARMONIC_MAX - FREQUENCY_MAX));
+		level *= fclamp(harmonicLevelFactor, 0.0, levelFactor);
 	}
 
 	// calculate output
