@@ -22,10 +22,11 @@ using namespace daisy;
 using namespace aurora;
 using namespace daisysp;
 
+#define SAMPLE_RATE 48000
 #define DFT_SIZE 4096
-#define OSCILLATOR_COUNT 4
+#define OSCILLATOR_COUNT 3
 #define OUTPUT_BLEND_SAMPLES 4
-#define RANDOM_SAMPLE_COUNT 128
+#define RANDOM_SAMPLE_COUNT 64
 #define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
 #define HARMONIC_MAX 20000
@@ -33,6 +34,9 @@ using namespace daisysp;
 const float RANDOM_SAMPLE_RECIP = 1.0 / RANDOM_SAMPLE_COUNT;
 const int BIN_COUNT = DFT_SIZE / 2;
 const double BIN_AMPLITUDE_RECIP = 2.0 / DFT_SIZE;
+const double FREQUENCY_TO_BIN = 2.0 / SAMPLE_RATE * BIN_COUNT;
+const double BIN_WIDTH = (SAMPLE_RATE / 2.0) / BIN_COUNT;
+const float LEVEL_EPSILON = 0.001; // -60dB
 
 typedef float dft_t;
 
@@ -124,27 +128,51 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		dft.Direct(signalBuffer+DFT_SIZE, spectrumBuffer+DFT_SIZE);
 	}
 
-	memset(processedSpectrumBuffer, 0, sizeof(dft_t)*2*DFT_SIZE);
+	memset(processedSpectrumBuffer, 0, sizeof(dft_t)*2*DFT_SIZE); // clear any existing spectrum data
 	dft_t* leftProcessed = processedSpectrumBuffer;
 	dft_t* rightProcessed = processedSpectrumBuffer+DFT_SIZE;
 
-	float nyquistLimit = hw.AudioSampleRate()/2.0;
 	double frequency = baseFrequency;
-	float level = 1.0 + resonance;
-	size_t lastBin = -1;
-	while (frequency < nyquistLimit) {
-		size_t bin1 = frequency / nyquistLimit * BIN_COUNT;
-		if (bin1 == lastBin || level == 0) break; // can happen when stride or level is small
-		size_t bin2 = BIN_COUNT + bin1;
-		// transfer harmonic bin levels to processed spectrum
-		leftProcessed[bin1] = level * leftSpectrum[bin1] * BIN_AMPLITUDE_RECIP; // real part
-		leftProcessed[bin2] = level * leftSpectrum[bin2] * BIN_AMPLITUDE_RECIP; // imaginary part
-		rightProcessed[bin1] = level * rightSpectrum[bin1] * BIN_AMPLITUDE_RECIP; // real part
-		rightProcessed[bin2] = level * rightSpectrum[bin2] * BIN_AMPLITUDE_RECIP; // imaginary part
-		// updates for next iteration
-		lastBin = bin1;
-		frequency += frequency * strideFactor;
-		level *= levelFactor;
+	double level = 1.0 + resonance;
+	size_t bin1 = frequency * FREQUENCY_TO_BIN;
+	size_t bin2 = BIN_COUNT + bin1;
+	float frequencyIncrement = frequency * strideFactor; // this is the smallest the increment can be
+	if (frequencyIncrement < BIN_WIDTH/2.0) {
+		if (levelFactor > 1.0 - LEVEL_EPSILON) {
+			// copy spectrum as-is
+			size_t binsRemaining = BIN_COUNT - bin1;
+			memcpy(leftProcessed+bin1, leftSpectrum+bin1, sizeof(dft_t)*binsRemaining);
+			memcpy(leftProcessed+bin2, leftSpectrum+bin2, sizeof(dft_t)*binsRemaining);
+			memcpy(rightProcessed+bin1, rightSpectrum+bin1, sizeof(dft_t)*binsRemaining);
+			memcpy(rightProcessed+bin2, rightSpectrum+bin2, sizeof(dft_t)*binsRemaining);
+		}
+		else {
+			while (bin1 < BIN_COUNT) {
+				leftProcessed[bin1] = level * leftSpectrum[bin1]; // real part
+				leftProcessed[bin2] = level * leftSpectrum[bin2]; // imaginary part
+				rightProcessed[bin1] = level * rightSpectrum[bin1]; // real part
+				rightProcessed[bin2] = level * rightSpectrum[bin2]; // imaginary part
+				level *= levelFactor;
+				if (level < LEVEL_EPSILON) break;
+				bin1++;
+				bin2++;
+			}
+		}
+	}
+	else {
+		while (bin1 < BIN_COUNT) {
+			// transfer harmonic bin levels to processed spectrum
+			leftProcessed[bin1] = level * leftSpectrum[bin1]; // real part
+			leftProcessed[bin2] = level * leftSpectrum[bin2]; // imaginary part
+			rightProcessed[bin1] = level * rightSpectrum[bin1]; // real part
+			rightProcessed[bin2] = level * rightSpectrum[bin2]; // imaginary part
+			// updates for next iteration
+			frequency += frequency * strideFactor;
+			level *= levelFactor;
+			if (level < LEVEL_EPSILON) break;
+			bin1 = frequency * FREQUENCY_TO_BIN;
+			bin2 = BIN_COUNT + bin1;
+		}
 	}
 
 	dft.Inverse(leftProcessed, signalBuffer);
@@ -219,6 +247,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		// once above freqeuncy max, drop level to zero (at harmonic max)
 		float harmonicLevelFactor = lerp(levelFactor, 0.0, (freq - FREQUENCY_MAX)/(HARMONIC_MAX - FREQUENCY_MAX));
 		level *= fclamp(harmonicLevelFactor, 0.0, levelFactor);
+		if (level < LEVEL_EPSILON) break;
 	}
 
 	// calculate output
@@ -226,9 +255,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	for (size_t i = 0; i < size; i++) {
 		size_t index = DFT_SIZE/2 - size/2 + i; // read from center of processed signal
 		size_t freezeIndex = (index + freezeOffset) % DFT_SIZE; // rotate through signal when frozen
-		// left channel
-		dft_t leftValue = limit(signalBuffer[freezeIndex] + leftResonance[i]);
-		dft_t rightValue = limit(signalBuffer[DFT_SIZE+freezeIndex] + rightResonance[i]);
+		// get outputs
+		dft_t leftRaw = signalBuffer[freezeIndex] * BIN_AMPLITUDE_RECIP;
+		dft_t leftValue = limit(leftRaw + leftResonance[i]);
+		dft_t rightRaw = signalBuffer[DFT_SIZE + freezeIndex] * BIN_AMPLITUDE_RECIP;
+		dft_t rightValue = limit(rightRaw + rightResonance[i]);
 		if (i < OUTPUT_BLEND_SAMPLES) {
 			// blend previous output value to increasing degree
 			float blend = (i+1.f)/OUTPUT_BLEND_SAMPLES;
