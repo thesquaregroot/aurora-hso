@@ -133,7 +133,8 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 
 	double frequency = baseFrequency;
 	double level = 1.0 + resonance;
-	size_t bin1 = frequency * FREQUENCY_TO_BIN;
+	size_t cutoffBin = frequency * FREQUENCY_TO_BIN;
+	size_t bin1 = cutoffBin;
 	size_t bin2 = BIN_COUNT + bin1;
 	float frequencyIncrement = frequency * strideFactor;
 	if (isFreezeActive || abs(frequencyIncrement) < BIN_WIDTH/2.0 || abs(strideFactor) < STRIDE_EPSILON) {
@@ -156,6 +157,11 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 				memcpy(rightProcessed+bin1, rightSpectrum+bin1, sizeof(dft_t)*binsRemaining);
 				memcpy(rightProcessed+bin2, rightSpectrum+bin2, sizeof(dft_t)*binsRemaining);
 			}
+			// boost cutoff freqeuncy (resonance)
+			leftProcessed[cutoffBin] *= level;
+			leftProcessed[cutoffBin+BIN_COUNT] *= level;
+			rightProcessed[cutoffBin] *= level;
+			rightProcessed[cutoffBin+BIN_COUNT] *= level;
 		}
 		else {
 			// rely on level decay to bail out in a timely fashion
@@ -188,6 +194,11 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 				bin1 = (bin1 == nextBin) ? bin1 + increment : nextBin;
 				bin2 = BIN_COUNT + bin1;
 			}
+			// boost cutoff freqeuncy (resonance)
+			leftProcessed[cutoffBin] *= level;
+			leftProcessed[cutoffBin+BIN_COUNT] *= level;
+			rightProcessed[cutoffBin] *= level;
+			rightProcessed[cutoffBin+BIN_COUNT] *= level;
 		}
 		else {
 			// sparse placement, but level decay allows us to bail out before too long
@@ -252,7 +263,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 
 	float rawResonance = hw.GetKnobValue(KNOB_BLUR) + hw.GetCvValue(CV_BLUR);
 	float resonance = fclamp(rawResonance, 0.0, 2.0);
-	float selfOscillation = fmap(4.0*(resonance - 0.75), 0.0, 1.0);
+	float selfOscillation = isFreezeActive ? resonance : fmap(4.0*(resonance - 0.75), 0.0, 1.0);
 	selfOscillation = pow(selfOscillation, 2.0); // quadratic curve
 
 	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT);
