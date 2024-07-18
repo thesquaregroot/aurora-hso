@@ -36,7 +36,7 @@ const int BIN_COUNT = DFT_SIZE / 2;
 const double BIN_AMPLITUDE_RECIP = 2.0 / DFT_SIZE;
 const double FREQUENCY_TO_BIN = 2.0 / SAMPLE_RATE * BIN_COUNT;
 const double BIN_WIDTH = (SAMPLE_RATE / 2.0) / BIN_COUNT;
-const float LEVEL_EPSILON = 0.001; // -60dB
+const float LEVEL_EPSILON = 0.01; // -40dB
 
 typedef float dft_t;
 
