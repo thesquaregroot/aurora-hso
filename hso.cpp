@@ -24,7 +24,7 @@ using namespace daisysp;
 
 #define SAMPLE_RATE 48000
 #define DFT_SIZE 4096
-#define OSCILLATOR_COUNT 3
+#define OSCILLATOR_COUNT 5
 #define OUTPUT_BLEND_SAMPLES 4
 #define RANDOM_SAMPLE_COUNT 64
 #define FREQUENCY_MIN 20
@@ -245,9 +245,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 		freq += freq * strideFactor;
 		// once above freqeuncy max, drop level to zero (at harmonic max)
-		float harmonicLevelFactor = lerp(levelFactor, 0.0, (freq - FREQUENCY_MAX)/(HARMONIC_MAX - FREQUENCY_MAX));
-		level *= fclamp(harmonicLevelFactor, 0.0, levelFactor);
-		if (level < LEVEL_EPSILON) break;
+		level *= levelFactor;
+		if (freq > HARMONIC_MAX || level < LEVEL_EPSILON) break;
 	}
 
 	// calculate output
