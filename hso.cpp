@@ -11,9 +11,12 @@
  *	- Atomosphere: Harmonic level (relative level of each harmonic), ranging from 0 to 1.
  *	- Mix: Blend between dry signal and processed signal.
  *	- Reverse: Change sign of stride (generate/collect subharmonics instead).
- *	- Freeze: Filter cutoff mode. This treats the stride as 0 for input processing.
+ *	- Freeze: Filter cutoff mode. This treats the stride as 0 for input processing, effectively becoming
+ *				a brick-wall high-pass (or, if reverse is activated, low-pass) filter with resonance character
+ *				determined by stride/level controls.
  */
 #include <cstdlib> // for srand & rand
+#include <string>
 #include "aurora.h"
 #include "daisysp.h"
 #include "fft/shy_fft.h"
@@ -27,18 +30,24 @@ using namespace daisysp;
 #define SAMPLE_RATE 48000
 #define DFT_SIZE 4096
 #define OSCILLATOR_COUNT 4
+
 #define OUTPUT_BLEND_SAMPLES 4
-#define RANDOM_SAMPLE_COUNT 64
+#define RANDOM_SAMPLE_COUNT 32
+
 #define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
 #define HARMONIC_MAX 20000
+
+#define CONFIG_FILE "HSO.txt"
+#define CONFIG_REVERSE "INVERT_REVERSE"
+#define CONFIG_FREEZE "INVERT_FREEZE"
 
 const float RANDOM_SAMPLE_RECIP = 1.0 / RANDOM_SAMPLE_COUNT;
 const int BIN_COUNT = DFT_SIZE / 2;
 const double BIN_AMPLITUDE_RECIP = 2.0 / DFT_SIZE;
 const double FREQUENCY_TO_BIN = 2.0 / SAMPLE_RATE * BIN_COUNT;
 const double BIN_WIDTH = (SAMPLE_RATE / 2.0) / BIN_COUNT;
-const float STRIDE_EPSILON = 0.001; // -40dB
+const float STRIDE_EPSILON = 0.01; // arbitrary small value
 const float LEVEL_EPSILON = 0.01; // -40dB
 
 typedef float dft_t;
@@ -92,7 +101,13 @@ inline float lerp(float a, float b, float t) {
 	return a + t * (b - a);
 }
 
+
 Hardware hw;
+bool isUsbConnected = false;
+bool isUsbConfigured = false;
+bool wasConfigLoadAttempted = false;
+bool isConfigChanged = false;
+
 Oscillator leftOscillators[OSCILLATOR_COUNT];
 Oscillator rightOscillators[OSCILLATOR_COUNT];
 Switch reverseButton;
@@ -236,10 +251,12 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	reverseButton.Debounce();
 	if (reverseButton.RisingEdge()) {
 		isReverseInverted = !isReverseInverted;
+		isConfigChanged = true;
 	}
 	freezeButton.Debounce();
 	if (freezeButton.RisingEdge()) {
 		isFreezeInverted = !isFreezeInverted;
+		isConfigChanged = true;
 	}
 
 	bool reverseGateState = hw.GetGateState(GATE_REVERSE);
@@ -325,15 +342,97 @@ void _initOsc(Oscillator& osc, bool isCosine) {
 	}
 }
 
+// the following file IO variables are global
+// as they can't be declared on the stack
+// see: https://forum.electro-smith.com/t/error-reading-file-from-sd-card/3911
+FIL file;
+FRESULT fileResult;
+char configFilePath[100];
+char fileLineBuffer[100];
+
+void USBConnectCallback(void* userdata) {
+	isUsbConnected = true;
+}
+
+void USBDisconnectCallback(void* userdata) {
+	isUsbConnected = false;
+	isUsbConfigured = false;
+}
+
+void USBClassActiveCallback(void* userdata) {
+	isUsbConfigured = true;
+}
+
+bool LoadConfig() {
+	fileResult = f_open(&file, configFilePath, (FA_OPEN_EXISTING | FA_READ));
+	if (fileResult) {
+		// report errors through LEDs
+		hw.SetLed(LED_1, fileResult == FR_DISK_ERR, fileResult == FR_INT_ERR, fileResult == FR_NOT_READY);
+		hw.SetLed(LED_2, 1.0, 1.0, 1.0); // white
+		hw.SetLed(LED_3, fileResult == FR_NO_FILE, fileResult == FR_NO_PATH, fileResult == FR_INVALID_NAME);
+		hw.SetLed(LED_4, 1.0, 1.0, 1.0); // white
+		hw.SetLed(LED_5, fileResult == FR_DENIED, fileResult == FR_EXIST, fileResult == FR_INVALID_OBJECT);
+		hw.WriteLeds();
+		return false;
+	}
+
+	while (f_gets(fileLineBuffer, sizeof fileLineBuffer, &file)) {
+		string line(fileLineBuffer);
+		string::size_type pos = line.find("=");
+		if (pos == string::npos) continue;
+
+		string key = line.substr(0, pos);
+		string value = line.substr(pos+1);
+		if (key == CONFIG_REVERSE) {
+			isReverseInverted = atoi(value.c_str()) > 0;
+		}
+		else if (key == CONFIG_FREEZE) {
+			isFreezeInverted = atoi(value.c_str()) > 0;
+		}
+	}
+	f_close(&file);
+	return true;
+}
+
+bool WriteConfig() {
+	fileResult = f_open(&file, configFilePath, (FA_WRITE | FA_CREATE_ALWAYS));
+	if (fileResult) {
+		// report errors through LEDs
+		hw.SetLed(LED_1, fileResult == FR_DISK_ERR, fileResult == FR_INT_ERR, fileResult == FR_NOT_READY);
+		hw.SetLed(LED_2, 1.0, 1.0, 1.0); // white
+		hw.SetLed(LED_3, fileResult == FR_NO_FILE, fileResult == FR_NO_PATH, fileResult == FR_INVALID_NAME);
+		hw.SetLed(LED_4, 1.0, 1.0, 1.0); // white
+		hw.SetLed(LED_5, fileResult == FR_DENIED, fileResult == FR_EXIST, fileResult == FR_INVALID_OBJECT);
+		hw.WriteLeds();
+		return false;
+	}
+
+	f_puts(CONFIG_REVERSE, &file);
+	f_puts(isReverseInverted ? "=1\n" : "=0\n", &file);
+	f_puts(CONFIG_FREEZE, &file);
+	f_puts(isFreezeInverted ? "=1\n" : "=0\n", &file);
+	f_close(&file);
+	return true;
+}
+
+
 int main(void) {
+	hw.Init();
+	// Prepare for loading config via USB
+	string path = string(fatfs_interface.GetUSBPath()) + CONFIG_FILE;
+	strcpy(configFilePath, path.c_str());
+	// ClassActiveCallback appears to only be called when booting from QSPI (or flash?).
+	//
+	// In Makefile: APP_TYPE = BOOT_QSPI
+	//
+	// See: https://forum.electro-smith.com/t/usb-capabilities-patch-sm-and-seed/4337/16
+	hw.PrepareMedia(USBConnectCallback, USBDisconnectCallback, USBClassActiveCallback);
+
+	// objects required for signal processing
 	dft.Init();
 	for (size_t i = 0; i < DFT_SIZE; i++) {
 		window[i] = hann(indexPhase(i));
 	}
-
-	hw.Init();
-	hw.SetAudioBlockSize(256);
-
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		_initOsc(leftOscillators[i], false); // sines
 		_initOsc(rightOscillators[i], true); // cosines
@@ -341,16 +440,29 @@ int main(void) {
 
 	reverseButton = hw.GetButton(SW_REVERSE);
 	freezeButton = hw.GetButton(SW_FREEZE);
+
+	// ready to start audio
+	hw.SetAudioBlockSize(256);
+	hw.StartAudio(AudioCallback);
+
 	Color colorWhite;
 	colorWhite.Init(Color::WHITE);
 	Color colorOff;
 	colorOff.Init(Color::OFF);
 
-	hw.StartAudio(AudioCallback);
-
 	/** Infinite Loop */
 	srand(0);
 	while (1) {
+		usb.Process();
+		if (isUsbConfigured && !wasConfigLoadAttempted) {
+			LoadConfig();
+			wasConfigLoadAttempted = true; // only try to load once
+		}
+		if (isUsbConfigured && isConfigChanged) {
+			WriteConfig();
+			isConfigChanged = false; // only try to save changed once
+		}
+		// Update LEDs
 		float leftInAvg = 0.0;
 		float rightInAvg = 0.0;
 		float leftOutAvg = 0.0;
@@ -368,7 +480,6 @@ int main(void) {
 		rightOutAvg *= RANDOM_SAMPLE_RECIP;
 		float leftMid = (leftInAvg + leftOutAvg) / 2;
 		float rightMid = (rightInAvg + rightOutAvg) / 2;
-		// set leds
 		hw.SetLed(LED_REVERSE, isReverseActive ? colorWhite : colorOff);
 		hw.SetLed(LED_FREEZE, isFreezeActive ? colorWhite : colorOff);
 		hw.SetLed(LED_1, leftInAvg, 0.0, 0.0); // red

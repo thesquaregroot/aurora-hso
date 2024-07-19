@@ -2,7 +2,7 @@
 TARGET = AuroraHSO
 
 # Build Project for Daisy Bootloader
-APP_TYPE = BOOT_SRAM
+APP_TYPE = BOOT_QSPI
 
 # Sources
 CPP_SOURCES = hso.cpp
@@ -29,5 +29,6 @@ DAISYSP_DIR = $(AURORA_SDK_PATH)/libs/DaisySP/
 OPT = -O3
 
 # Core location, and generic Makefile.
+USE_FATFS = 1
 SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
 include $(SYSTEM_FILES_DIR)/Makefile
