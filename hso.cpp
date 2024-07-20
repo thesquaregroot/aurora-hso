@@ -31,9 +31,6 @@ using namespace daisysp;
 #define DFT_SIZE 4096
 #define OSCILLATOR_COUNT 4
 
-#define OUTPUT_BLEND_SAMPLES 4
-#define RANDOM_SAMPLE_COUNT 32
-
 #define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
 #define HARMONIC_MAX 20000
@@ -42,13 +39,14 @@ using namespace daisysp;
 #define CONFIG_REVERSE "INVERT_REVERSE"
 #define CONFIG_FREEZE "INVERT_FREEZE"
 
-const float RANDOM_SAMPLE_RECIP = 1.0 / RANDOM_SAMPLE_COUNT;
-const int BIN_COUNT = DFT_SIZE / 2;
-const double BIN_AMPLITUDE_RECIP = 2.0 / DFT_SIZE;
-const double FREQUENCY_TO_BIN = 2.0 / SAMPLE_RATE * BIN_COUNT;
-const double BIN_WIDTH = (SAMPLE_RATE / 2.0) / BIN_COUNT;
-const float STRIDE_EPSILON = 0.01; // arbitrary small value
-const float LEVEL_EPSILON = 0.01; // -40dB
+
+DTCM_MEM_SECTION const double DFT_SIZE_RECIP = 1.0 / DFT_SIZE;
+DTCM_MEM_SECTION const int BIN_COUNT = DFT_SIZE / 2;
+DTCM_MEM_SECTION const double BIN_AMPLITUDE_RECIP = 2.0 / DFT_SIZE;
+DTCM_MEM_SECTION const double FREQUENCY_TO_BIN = 2.0 / SAMPLE_RATE * BIN_COUNT;
+DTCM_MEM_SECTION const double BIN_WIDTH = (SAMPLE_RATE / 2.0) / BIN_COUNT;
+DTCM_MEM_SECTION const float STRIDE_EPSILON = 0.01; // arbitrary small value
+DTCM_MEM_SECTION const float LEVEL_EPSILON = 0.01; // -40dB
 
 typedef float dft_t;
 
@@ -101,15 +99,14 @@ inline float lerp(float a, float b, float t) {
 	return a + t * (b - a);
 }
 
-
 Hardware hw;
 bool isUsbConnected = false;
 bool isUsbConfigured = false;
 bool wasConfigLoadAttempted = false;
 bool isConfigChanged = false;
 
-Oscillator leftOscillators[OSCILLATOR_COUNT];
-Oscillator rightOscillators[OSCILLATOR_COUNT];
+DTCM_MEM_SECTION Oscillator leftOscillators[OSCILLATOR_COUNT];
+DTCM_MEM_SECTION Oscillator rightOscillators[OSCILLATOR_COUNT];
 Switch reverseButton;
 bool isReverseActive = false;
 bool isReverseInverted = false; // flips gate interpretation, changed by user input
@@ -117,14 +114,20 @@ Switch freezeButton;
 bool isFreezeActive = false;
 bool isFreezeInverted = false; // flips gate interpretation, changed by user input
 
-Buffer leftSignal; // input signal for left channel
-Buffer rightSignal; // input signal for right channel
-Buffer leftOuts; // output memory for left channel
-Buffer rightOuts; // output memory for right channel
+DTCM_MEM_SECTION Buffer leftSignal; // input signal for left channel
+DTCM_MEM_SECTION Buffer rightSignal; // input signal for right channel
+
+// variables for tracking averages (for LEDs)
+DTCM_MEM_SECTION Buffer leftOuts; // output signal for left channel
+DTCM_MEM_SECTION Buffer rightOuts; // output signal for right channel
+DTCM_MEM_SECTION double leftInTotal = 0;
+DTCM_MEM_SECTION double rightInTotal = 0;
+DTCM_MEM_SECTION double leftOutTotal = 0;
+DTCM_MEM_SECTION double rightOutTotal = 0;
 
 Math<dft_t> math;
-ShyFFT<dft_t, DFT_SIZE> dft;
-dft_t* window = new dft_t[DFT_SIZE];
+DTCM_MEM_SECTION ShyFFT<dft_t, DFT_SIZE> dft;
+DTCM_MEM_SECTION dft_t window[DFT_SIZE];
 dft_t* signalBuffer = new dft_t[2*DFT_SIZE];
 dft_t* spectrumBuffer = new dft_t[2*DFT_SIZE];
 dft_t* processedSpectrumBuffer = new dft_t[2*DFT_SIZE];
@@ -152,7 +155,7 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	size_t bin1 = cutoffBin;
 	size_t bin2 = BIN_COUNT + bin1;
 	float frequencyIncrement = frequency * strideFactor;
-	if (isFreezeActive || abs(frequencyIncrement) < BIN_WIDTH/2.0 || abs(strideFactor) < STRIDE_EPSILON) {
+	if (isFreezeActive || fabsf(frequencyIncrement) < BIN_WIDTH/2.0 || fabsf(strideFactor) < STRIDE_EPSILON) {
 		// copy contiguous chunks of spectrum
 		if (isFreezeActive || levelFactor > 1.0 - LEVEL_EPSILON) {
 			// no level adjustments, so we can copy more efficiently (and need to)
@@ -236,6 +239,11 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 			}
 		}
 	}
+	// prevent issues with low frequencies / DC
+	leftProcessed[0] = 0;
+	leftProcessed[1] = 0;
+	leftProcessed[BIN_COUNT] = 0;
+	leftProcessed[BIN_COUNT+1] = 0;
 idft:
 	dft.Inverse(leftProcessed, signalBuffer);
 	dft.Inverse(rightProcessed, signalBuffer+DFT_SIZE);
@@ -265,6 +273,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	isFreezeActive = isFreezeInverted ? !freezeGateState : freezeGateState;
 
 	for (size_t i = 0; i < size; i++) {
+		if (leftSignal.size() == DFT_SIZE) {
+			// remove oldest value from running total
+			leftInTotal -= fabsf(leftSignal[0]);
+			rightInTotal -= fabsf(rightSignal[0]);
+		}
+		leftInTotal += fabsf(in[0][i]);
+		rightInTotal += fabsf(in[1][i]);
+		// store new values
 		leftSignal.put(in[0][i]);
 		rightSignal.put(in[1][i]);
 	}
@@ -319,16 +335,20 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		double rightRaw = signalBuffer[DFT_SIZE + index] * BIN_AMPLITUDE_RECIP;
 		dft_t leftValue = limit(leftRaw + leftResonance[i]);
 		dft_t rightValue = limit(rightRaw + rightResonance[i]);
-		if (i < OUTPUT_BLEND_SAMPLES) {
-			// blend previous output value to increasing degree
-			float blend = (i+1.f)/OUTPUT_BLEND_SAMPLES;
-			leftValue = lerp(leftOuts[DFT_SIZE-1], leftValue, blend);
-			rightValue = lerp(rightOuts[DFT_SIZE-1], rightValue, blend);
+		dft_t leftOut = (leftSignal[index] * (1.f - mix)) + (leftValue * mix);
+		dft_t rightOut = (rightSignal[index] * (1.f - mix)) + (rightValue * mix);
+		if (leftOuts.size() == DFT_SIZE) {
+			// remove oldest value from running total
+			leftOutTotal -= fabsf(leftOuts[0]);
+			rightOutTotal -= fabsf(rightOuts[0]);
 		}
-		out[0][i] = (leftSignal[index] * (1.f - mix)) + (leftValue * mix);
-		out[1][i] = (rightSignal[index] * (1.f - mix)) + (rightValue * mix);
-		leftOuts.put(out[0][i]);
-		rightOuts.put(out[1][i]);
+		leftOutTotal += fabsf(leftOut);
+		rightOutTotal += fabsf(rightOut);
+		// store new values
+		leftOuts.put(leftOut);
+		rightOuts.put(rightOut);
+		out[0][i] = leftOut;
+		out[1][i] = rightOut;
 	}
 }
 
@@ -342,14 +362,6 @@ void _initOsc(Oscillator& osc, bool isCosine) {
 	}
 }
 
-// the following file IO variables are global
-// as they can't be declared on the stack
-// see: https://forum.electro-smith.com/t/error-reading-file-from-sd-card/3911
-FIL file;
-FRESULT fileResult;
-char configFilePath[100];
-char fileLineBuffer[100];
-
 void USBConnectCallback(void* userdata) {
 	isUsbConnected = true;
 }
@@ -362,6 +374,14 @@ void USBDisconnectCallback(void* userdata) {
 void USBClassActiveCallback(void* userdata) {
 	isUsbConfigured = true;
 }
+
+// the following file IO variables are global
+// as they can't be declared on the stack
+// see: https://forum.electro-smith.com/t/error-reading-file-from-sd-card/3911
+FIL file;
+FRESULT fileResult;
+char configFilePath[100];
+char fileLineBuffer[100];
 
 bool LoadConfig() {
 	fileResult = f_open(&file, configFilePath, (FA_OPEN_EXISTING | FA_READ));
@@ -458,26 +478,16 @@ int main(void) {
 			LoadConfig();
 			wasConfigLoadAttempted = true; // only try to load once
 		}
-		if (isUsbConfigured && isConfigChanged) {
+		else if (isUsbConfigured && isConfigChanged) {
 			WriteConfig();
 			isConfigChanged = false; // only try to save changed once
 		}
+		System::Delay(1);
 		// Update LEDs
-		float leftInAvg = 0.0;
-		float rightInAvg = 0.0;
-		float leftOutAvg = 0.0;
-		float rightOutAvg = 0.0;
-		for (size_t i = 0; i < RANDOM_SAMPLE_COUNT; i++) {
-			size_t r = rand() % DFT_SIZE;
-			leftInAvg += abs(leftSignal[r]);
-			rightInAvg += abs(rightSignal[r]);
-			leftOutAvg += abs(leftOuts[r]);
-			rightOutAvg += abs(rightOuts[r]);
-		}
-		leftInAvg *= RANDOM_SAMPLE_RECIP;
-		rightInAvg *= RANDOM_SAMPLE_RECIP;
-		leftOutAvg *= RANDOM_SAMPLE_RECIP;
-		rightOutAvg *= RANDOM_SAMPLE_RECIP;
+		float leftInAvg = leftInTotal * DFT_SIZE_RECIP;
+		float rightInAvg = rightInTotal * DFT_SIZE_RECIP;
+		float leftOutAvg = leftOutTotal * DFT_SIZE_RECIP;
+		float rightOutAvg = rightOutTotal * DFT_SIZE_RECIP;
 		float leftMid = (leftInAvg + leftOutAvg) / 2;
 		float rightMid = (rightInAvg + rightOutAvg) / 2;
 		hw.SetLed(LED_REVERSE, isReverseActive ? colorWhite : colorOff);
