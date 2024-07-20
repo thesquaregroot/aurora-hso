@@ -17,6 +17,7 @@
  */
 #include <cstdlib> // for srand & rand
 #include <string>
+#include <cmath> // for isfinite
 #include "aurora.h"
 #include "daisysp.h"
 #include "fft/shy_fft.h"
@@ -249,7 +250,11 @@ idft:
 	dft.Inverse(rightProcessed, signalBuffer+DFT_SIZE);
 }
 
-dft_t limit(dft_t value) {
+dft_t limit(dft_t value, dft_t previousValue) {
+	if (!isfinite(value)) {
+		//return signbit(previousValue) ? -1.f : 1.f;
+		return previousValue;
+	}
 	return SoftClip(value);
 }
 
@@ -333,22 +338,27 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		// get outputs
 		double leftRaw = signalBuffer[index] * BIN_AMPLITUDE_RECIP;
 		double rightRaw = signalBuffer[DFT_SIZE + index] * BIN_AMPLITUDE_RECIP;
-		dft_t leftValue = limit(leftRaw + leftResonance[i]);
-		dft_t rightValue = limit(rightRaw + rightResonance[i]);
-		dft_t leftOut = (leftSignal[index] * (1.f - mix)) + (leftValue * mix);
-		dft_t rightOut = (rightSignal[index] * (1.f - mix)) + (rightValue * mix);
+		dft_t previousLeft = 0.0;
+		dft_t previousRight = 0.0;
+		if (leftOuts.size() > 0) {
+			previousLeft = leftOuts[leftOuts.size()-1];
+			previousRight = rightOuts[rightOuts.size()-1];
+		}
+		dft_t leftValue = limit(leftRaw + leftResonance[i], previousLeft);
+		dft_t rightValue = limit(rightRaw + rightResonance[i], previousRight);
+		// store result
 		if (leftOuts.size() == DFT_SIZE) {
 			// remove oldest value from running total
 			leftOutTotal -= fabsf(leftOuts[0]);
 			rightOutTotal -= fabsf(rightOuts[0]);
 		}
-		leftOutTotal += fabsf(leftOut);
-		rightOutTotal += fabsf(rightOut);
-		// store new values
-		leftOuts.put(leftOut);
-		rightOuts.put(rightOut);
-		out[0][i] = leftOut;
-		out[1][i] = rightOut;
+		leftOutTotal += fabsf(leftValue);
+		rightOutTotal += fabsf(rightValue);
+		leftOuts.put(leftValue);
+		rightOuts.put(rightValue);
+		// mix with input signal (with same delay)
+		out[0][i] = (leftSignal[index] * (1.f - mix)) + (leftValue * mix);
+		out[1][i] = (rightSignal[index] * (1.f - mix)) + (rightValue * mix);
 	}
 }
 
@@ -484,10 +494,10 @@ int main(void) {
 		}
 		System::Delay(1);
 		// Update LEDs
-		float leftInAvg = leftInTotal * DFT_SIZE_RECIP;
-		float rightInAvg = rightInTotal * DFT_SIZE_RECIP;
-		float leftOutAvg = leftOutTotal * DFT_SIZE_RECIP;
-		float rightOutAvg = rightOutTotal * DFT_SIZE_RECIP;
+		float leftInAvg = 2.0 * leftInTotal * DFT_SIZE_RECIP;
+		float rightInAvg = 2.0 * rightInTotal * DFT_SIZE_RECIP;
+		float leftOutAvg = 2.0 * leftOutTotal * DFT_SIZE_RECIP;
+		float rightOutAvg = 2.0 * rightOutTotal * DFT_SIZE_RECIP;
 		float leftMid = (leftInAvg + leftOutAvg) / 2;
 		float rightMid = (rightInAvg + rightOutAvg) / 2;
 		hw.SetLed(LED_REVERSE, isReverseActive ? colorWhite : colorOff);
