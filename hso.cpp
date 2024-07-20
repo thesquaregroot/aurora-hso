@@ -29,8 +29,9 @@ using namespace aurora;
 using namespace daisysp;
 
 #define SAMPLE_RATE 48000
+#define AUDIO_BLOCK_SIZE 256
 #define DFT_SIZE 4096
-#define OSCILLATOR_COUNT 4
+#define OSCILLATOR_COUNT 5
 
 #define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
@@ -108,6 +109,9 @@ bool isConfigChanged = false;
 
 DTCM_MEM_SECTION Oscillator leftOscillators[OSCILLATOR_COUNT];
 DTCM_MEM_SECTION Oscillator rightOscillators[OSCILLATOR_COUNT];
+DTCM_MEM_SECTION double leftResonance[AUDIO_BLOCK_SIZE];
+DTCM_MEM_SECTION double rightResonance[AUDIO_BLOCK_SIZE];
+
 Switch reverseButton;
 bool isReverseActive = false;
 bool isReverseInverted = false; // flips gate interpretation, changed by user input
@@ -240,19 +244,19 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 			}
 		}
 	}
+idft:
 	// prevent issues with low frequencies / DC
 	leftProcessed[0] = 0;
-	leftProcessed[1] = 0;
 	leftProcessed[BIN_COUNT] = 0;
-	leftProcessed[BIN_COUNT+1] = 0;
-idft:
+	rightProcessed[0] = 0;
+	rightProcessed[BIN_COUNT] = 0;
+	// perform inverse transform
 	dft.Inverse(leftProcessed, signalBuffer);
 	dft.Inverse(rightProcessed, signalBuffer+DFT_SIZE);
 }
 
 dft_t limit(dft_t value, dft_t previousValue) {
 	if (!isfinite(value)) {
-		//return signbit(previousValue) ? -1.f : 1.f;
 		return previousValue;
 	}
 	return SoftClip(value);
@@ -313,10 +317,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	float mix = fclamp(hw.GetKnobValue(KNOB_MIX) + hw.GetCvValue(CV_MIX), 0.0, 1.0);
 
 	// handle self-resonance
-	double leftResonance[size]{ 0 };
-	double rightResonance[size]{ 0 };
+	memset(leftResonance, 0, sizeof(double)*AUDIO_BLOCK_SIZE);
+	memset(rightResonance, 0, sizeof(double)*AUDIO_BLOCK_SIZE);
 	double freq = baseFrequency;
-	float level = 0.5 * selfOscillation; // reduced amplitude to give headroom for harmonics
+	double level = 0.5 * selfOscillation; // reduced amplitude to give headroom for harmonics
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		Oscillator& l = leftOscillators[i];
 		Oscillator& r = rightOscillators[i];
@@ -472,7 +476,7 @@ int main(void) {
 	freezeButton = hw.GetButton(SW_FREEZE);
 
 	// ready to start audio
-	hw.SetAudioBlockSize(256);
+	hw.SetAudioBlockSize(AUDIO_BLOCK_SIZE);
 	hw.StartAudio(AudioCallback);
 
 	Color colorWhite;
