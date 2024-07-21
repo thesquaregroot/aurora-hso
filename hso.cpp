@@ -31,7 +31,7 @@ using namespace daisysp;
 #define SAMPLE_RATE 48000
 #define AUDIO_BLOCK_SIZE 256
 #define DFT_SIZE 4096
-#define OSCILLATOR_COUNT 5
+#define OSCILLATOR_COUNT 4
 
 #define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
@@ -40,7 +40,6 @@ using namespace daisysp;
 #define CONFIG_FILE "HSO.txt"
 #define CONFIG_REVERSE "INVERT_REVERSE"
 #define CONFIG_FREEZE "INVERT_FREEZE"
-
 
 DTCM_MEM_SECTION const double DFT_SIZE_RECIP = 1.0 / DFT_SIZE;
 DTCM_MEM_SECTION const int BIN_COUNT = DFT_SIZE / 2;
@@ -92,13 +91,12 @@ public:
 
 typedef _RingBuffer<dft_t, DFT_SIZE> Buffer;
 
-template<typename T>
-inline T lerp(T a, T b, T t) {
+inline float lerp(float a, float b, float t) {
 	return a + t * (b - a);
 }
 
-inline float lerp(float a, float b, float t) {
-	return a + t * (b - a);
+inline float inverse_lerp(float c, float a, float b) {
+	return (c - a) / (b - a);
 }
 
 Hardware hw;
@@ -107,8 +105,8 @@ bool isUsbConfigured = false;
 bool wasConfigLoadAttempted = false;
 bool isConfigChanged = false;
 
-DTCM_MEM_SECTION Oscillator leftOscillators[OSCILLATOR_COUNT];
-DTCM_MEM_SECTION Oscillator rightOscillators[OSCILLATOR_COUNT];
+Oscillator leftOscillators[OSCILLATOR_COUNT];
+Oscillator rightOscillators[OSCILLATOR_COUNT];
 DTCM_MEM_SECTION double leftResonance[AUDIO_BLOCK_SIZE];
 DTCM_MEM_SECTION double rightResonance[AUDIO_BLOCK_SIZE];
 
@@ -255,6 +253,16 @@ idft:
 	dft.Inverse(rightProcessed, signalBuffer+DFT_SIZE);
 }
 
+double getMaxResonanceLevel(float levelFactor) {
+	double total = 1.0; // fundamental
+	double harmonicLevel = levelFactor;
+	for (size_t i = 0; i < OSCILLATOR_COUNT - 1; i++) {
+		total += harmonicLevel;
+		harmonicLevel *= levelFactor;
+	}
+	return total;
+}
+
 dft_t limit(dft_t value, dft_t previousValue) {
 	if (!isfinite(value)) {
 		return previousValue;
@@ -320,7 +328,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	memset(leftResonance, 0, sizeof(double)*AUDIO_BLOCK_SIZE);
 	memset(rightResonance, 0, sizeof(double)*AUDIO_BLOCK_SIZE);
 	double freq = baseFrequency;
-	double level = 0.5 * selfOscillation; // reduced amplitude to give headroom for harmonics
+	// adjust level for theoretical max of all haromincs (so level is 1 when all waves coincide)
+	double level = selfOscillation / getMaxResonanceLevel(levelFactor);
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		Oscillator& l = leftOscillators[i];
 		Oscillator& r = rightOscillators[i];
@@ -331,8 +340,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			rightResonance[j] += level * r.Process();
 		}
 		freq += freq * strideFactor;
-		level *= levelFactor;
-		if (level < LEVEL_EPSILON || freq > HARMONIC_MAX || freq < FREQUENCY_MIN) break;
+		float lowFreqDropoff = fclamp(inverse_lerp(freq, 0, FREQUENCY_MIN), 0.f, 1.f);
+		float highFreqDropoff = fclamp(inverse_lerp(freq, HARMONIC_MAX, FREQUENCY_MAX), 0.f, 1.f);
+		level *= levelFactor * min(lowFreqDropoff, highFreqDropoff);
 	}
 
 	// calculate output
