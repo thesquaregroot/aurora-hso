@@ -35,19 +35,71 @@ using namespace daisysp;
 
 #define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
-#define HARMONIC_MAX 20000
+#define HARMONIC_MIN 1
+#define HARMONIC_DROP_LOW 5
+#define HARMONIC_DROP_HIGH 20000
+#define HARMONIC_MAX 24000
 
-#define CONFIG_FILE "HSO.txt"
+#define CONFIG_FILE_NAME "HSO.txt"
 #define CONFIG_REVERSE "INVERT_REVERSE"
 #define CONFIG_FREEZE "INVERT_FREEZE"
 
-DTCM_MEM_SECTION const double DFT_SIZE_RECIP = 1.0 / DFT_SIZE;
-DTCM_MEM_SECTION const int BIN_COUNT = DFT_SIZE / 2;
-DTCM_MEM_SECTION const double BIN_AMPLITUDE_RECIP = 2.0 / DFT_SIZE;
-DTCM_MEM_SECTION const double FREQUENCY_TO_BIN = 2.0 / SAMPLE_RATE * BIN_COUNT;
-DTCM_MEM_SECTION const double BIN_WIDTH = (SAMPLE_RATE / 2.0) / BIN_COUNT;
-DTCM_MEM_SECTION const float STRIDE_EPSILON = 0.01; // arbitrary small value
-DTCM_MEM_SECTION const float LEVEL_EPSILON = 0.01; // -40dB
+Hardware hw;
+bool isUsbConnected = false;
+bool isUsbConfigured = false;
+bool wasConfigLoadAttempted = false;
+bool isConfigChanged = false;
+
+#define LOG_ENABLED 0
+
+#if LOG_ENABLED
+#define LOG_FILE_NAME "HSO.log"
+#define LOG_ITERATIONS 1000
+uint32_t logIteration = 0;
+uint32_t callbackTotal = 0;
+uint32_t resonanceTotal = 0;
+uint32_t processTotal = 0;
+
+TimerHandle CreateTimer(TimerHandle::Config::Peripheral peripheral) {
+	TimerHandle::Config config;
+	config.periph = peripheral;
+	config.dir = TimerHandle::Config::CounterDir::UP;
+	TimerHandle timer;
+	timer.Init(config);
+	return timer;
+}
+
+FIL logFile;
+FRESULT logFileResult;
+char logFilePath[100];
+char logFileBuffer[256];
+bool isLogWritePending = false;
+
+bool WriteLog() {
+	logFileResult = f_open(&logFile, logFilePath, (FA_OPEN_APPEND | FA_WRITE));
+	if (logFileResult) {
+		hw.SetLed(LED_1, logFileResult == FR_DISK_ERR, logFileResult == FR_INT_ERR, logFileResult == FR_NOT_READY);
+		hw.SetLed(LED_2, 1.0, 1.0, 1.0); // white
+		hw.SetLed(LED_3, logFileResult == FR_NO_FILE, logFileResult == FR_NO_PATH, logFileResult == FR_INVALID_NAME);
+		hw.SetLed(LED_4, 1.0, 1.0, 1.0); // white
+		hw.SetLed(LED_5, logFileResult == FR_DENIED, logFileResult == FR_EXIST, logFileResult == FR_INVALID_OBJECT);
+		hw.WriteLeds();
+		return false;
+	}
+
+	f_puts(logFileBuffer, &logFile);
+	f_close(&logFile);
+	return true;
+}
+#endif
+
+const double DFT_SIZE_RECIP = 1.0 / DFT_SIZE;
+const int BIN_COUNT = DFT_SIZE / 2;
+const double BIN_AMPLITUDE_RECIP = 2.0 / DFT_SIZE;
+const double FREQUENCY_TO_BIN = 2.0 / SAMPLE_RATE * BIN_COUNT;
+const double BIN_WIDTH = (SAMPLE_RATE / 2.0) / BIN_COUNT;
+const float STRIDE_EPSILON = 0.01; // arbitrary small value
+const float LEVEL_EPSILON = 0.01; // -40dB
 
 typedef float dft_t;
 
@@ -99,16 +151,10 @@ inline float inverse_lerp(float c, float a, float b) {
 	return (c - a) / (b - a);
 }
 
-Hardware hw;
-bool isUsbConnected = false;
-bool isUsbConfigured = false;
-bool wasConfigLoadAttempted = false;
-bool isConfigChanged = false;
-
 Oscillator leftOscillators[OSCILLATOR_COUNT];
 Oscillator rightOscillators[OSCILLATOR_COUNT];
-DTCM_MEM_SECTION double leftResonance[AUDIO_BLOCK_SIZE];
-DTCM_MEM_SECTION double rightResonance[AUDIO_BLOCK_SIZE];
+double leftResonance[AUDIO_BLOCK_SIZE];
+double rightResonance[AUDIO_BLOCK_SIZE];
 
 Switch reverseButton;
 bool isReverseActive = false;
@@ -117,21 +163,21 @@ Switch freezeButton;
 bool isFreezeActive = false;
 bool isFreezeInverted = false; // flips gate interpretation, changed by user input
 
-DTCM_MEM_SECTION Buffer leftSignal; // input signal for left channel
-DTCM_MEM_SECTION Buffer rightSignal; // input signal for right channel
+DTCMRAM Buffer leftSignal; // input signal for left channel
+DTCMRAM Buffer rightSignal; // input signal for right channel
 
 // variables for tracking averages (for LEDs)
-DTCM_MEM_SECTION Buffer leftOuts; // output signal for left channel
-DTCM_MEM_SECTION Buffer rightOuts; // output signal for right channel
-DTCM_MEM_SECTION double leftInTotal = 0;
-DTCM_MEM_SECTION double rightInTotal = 0;
-DTCM_MEM_SECTION double leftOutTotal = 0;
-DTCM_MEM_SECTION double rightOutTotal = 0;
+DTCMRAM Buffer leftOuts; // output signal for left channel
+DTCMRAM Buffer rightOuts; // output signal for right channel
+double leftInTotal = 0;
+double rightInTotal = 0;
+double leftOutTotal = 0;
+double rightOutTotal = 0;
 
-Math<dft_t> math;
-DTCM_MEM_SECTION ShyFFT<dft_t, DFT_SIZE> dft;
-DTCM_MEM_SECTION dft_t window[DFT_SIZE];
-dft_t* signalBuffer = new dft_t[2*DFT_SIZE];
+DTCMRAM Math<dft_t> math;
+DTCMRAM ShyFFT<dft_t, DFT_SIZE> dft;
+DTCMRAM dft_t window[DFT_SIZE];
+dft_t* signalBuffer = new dft_t[2*DFT_SIZE]{};
 dft_t* spectrumBuffer = new dft_t[2*DFT_SIZE];
 dft_t* processedSpectrumBuffer = new dft_t[2*DFT_SIZE];
 
@@ -253,16 +299,6 @@ idft:
 	dft.Inverse(rightProcessed, signalBuffer+DFT_SIZE);
 }
 
-double getMaxResonanceLevel(float levelFactor) {
-	double total = 1.0; // fundamental
-	double harmonicLevel = levelFactor;
-	for (size_t i = 0; i < OSCILLATOR_COUNT - 1; i++) {
-		total += harmonicLevel;
-		harmonicLevel *= levelFactor;
-	}
-	return total;
-}
-
 dft_t limit(dft_t value, dft_t previousValue) {
 	if (!isfinite(value)) {
 		return previousValue;
@@ -271,6 +307,10 @@ dft_t limit(dft_t value, dft_t previousValue) {
 }
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size) {
+#if LOG_ENABLED
+	TimerHandle callbackTimer = CreateTimer(TimerHandle::Config::Peripheral::TIM_2);
+	callbackTimer.Start();
+#endif
 	hw.ProcessAllControls();
 
 	reverseButton.Debounce();
@@ -325,11 +365,15 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	float mix = fclamp(hw.GetKnobValue(KNOB_MIX) + hw.GetCvValue(CV_MIX), 0.0, 1.0);
 
 	// handle self-resonance
+#if LOG_ENABLED
+	TimerHandle resonanceTimer = CreateTimer(TimerHandle::Config::Peripheral::TIM_3);
+	resonanceTimer.Start();
+#endif
 	memset(leftResonance, 0, sizeof(double)*AUDIO_BLOCK_SIZE);
 	memset(rightResonance, 0, sizeof(double)*AUDIO_BLOCK_SIZE);
 	double freq = baseFrequency;
-	// adjust level for theoretical max of all haromincs (so level is 1 when all waves coincide)
-	double level = selfOscillation / getMaxResonanceLevel(levelFactor);
+	double level = 1.0;
+	double levelTotal = 0.0;
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		Oscillator& l = leftOscillators[i];
 		Oscillator& r = rightOscillators[i];
@@ -339,14 +383,27 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			leftResonance[j] += level * l.Process();
 			rightResonance[j] += level * r.Process();
 		}
+		levelTotal += level;
 		freq += freq * strideFactor;
-		float lowFreqDropoff = fclamp(inverse_lerp(freq, 0, FREQUENCY_MIN), 0.f, 1.f);
-		float highFreqDropoff = fclamp(inverse_lerp(freq, HARMONIC_MAX, FREQUENCY_MAX), 0.f, 1.f);
+		float lowFreqDropoff = fclamp(inverse_lerp(freq, HARMONIC_MIN, HARMONIC_DROP_LOW), 0.f, 1.f);
+		float highFreqDropoff = fclamp(inverse_lerp(freq, HARMONIC_MAX, HARMONIC_DROP_HIGH), 0.f, 1.f);
 		level *= levelFactor * min(lowFreqDropoff, highFreqDropoff);
 	}
+#if LOG_ENABLED
+	resonanceTimer.Stop();
+	resonanceTotal += resonanceTimer.GetUs();
+#endif
 
 	// calculate output
-	processSignals(baseFrequency, strideFactor, levelFactor, resonance);
+#if LOG_ENABLED
+	TimerHandle processTimer = CreateTimer(TimerHandle::Config::Peripheral::TIM_4);
+	processTimer.Start();
+#endif
+	//processSignals(baseFrequency, strideFactor, levelFactor, resonance);
+#if LOG_ENABLED
+	processTimer.Stop();
+	processTotal += processTimer.GetUs();
+#endif
 	for (size_t i = 0; i < size; i++) {
 		size_t index = DFT_SIZE/2 - size/2 + i; // read from center of processed signal
 		// get outputs
@@ -358,8 +415,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			previousLeft = leftOuts[leftOuts.size()-1];
 			previousRight = rightOuts[rightOuts.size()-1];
 		}
-		dft_t leftValue = limit(leftRaw + leftResonance[i], previousLeft);
-		dft_t rightValue = limit(rightRaw + rightResonance[i], previousRight);
+		// adjust level for theoretical max of all haromincs (so level is 1 when all waves coincide)
+		double leftRes = selfOscillation * leftResonance[i] / levelTotal;
+		double rightRes = selfOscillation * rightResonance[i] / levelTotal;
+		dft_t leftValue = limit(leftRaw + leftRes, previousLeft);
+		dft_t rightValue = limit(rightRaw + rightRes, previousRight);
 		// store result
 		if (leftOuts.size() == DFT_SIZE) {
 			// remove oldest value from running total
@@ -374,6 +434,25 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		out[0][i] = (leftSignal[index] * (1.f - mix)) + (leftValue * mix);
 		out[1][i] = (rightSignal[index] * (1.f - mix)) + (rightValue * mix);
 	}
+
+#if LOG_ENABLED
+	callbackTimer.Stop();
+	callbackTotal += callbackTimer.GetUs();
+	logIteration++;
+	if (logIteration % LOG_ITERATIONS == 0) {
+		// log totals
+		int timeAvg = callbackTotal / LOG_ITERATIONS;
+		int processAvg = processTotal / LOG_ITERATIONS;
+		int resAvg = resonanceTotal / LOG_ITERATIONS;
+		snprintf(logFileBuffer, 256, "Total: %i us, Process: %i us, Resonance: %i us\n", timeAvg, processAvg, resAvg);
+		isLogWritePending = true;
+		// reset
+		logIteration = 0;
+		callbackTotal = 0;
+		resonanceTotal = 0;
+		processTotal = 0;
+	}
+#endif
 }
 
 void _initOsc(Oscillator& osc, bool isCosine) {
@@ -401,6 +480,10 @@ void USBClassActiveCallback(void* userdata) {
 
 // the following file IO variables are global
 // as they can't be declared on the stack
+//
+// access methods also appear to need to be called
+// from main (i.e. not from audio callback)
+//
 // see: https://forum.electro-smith.com/t/error-reading-file-from-sd-card/3911
 FIL file;
 FRESULT fileResult;
@@ -459,12 +542,16 @@ bool WriteConfig() {
 	return true;
 }
 
-
 int main(void) {
 	hw.Init();
+
 	// Prepare for loading config via USB
-	string path = string(fatfs_interface.GetUSBPath()) + CONFIG_FILE;
-	strcpy(configFilePath, path.c_str());
+	const char* usbPath = fatfs_interface.GetUSBPath();
+	snprintf(configFilePath, 100, "%s%s", usbPath, CONFIG_FILE_NAME);
+#if LOG_ENABLED
+	snprintf(logFilePath, 100, "%s%s", usbPath, LOG_FILE_NAME);
+#endif
+
 	// ClassActiveCallback appears to only be called when booting from QSPI (or flash?).
 	//
 	// In Makefile: APP_TYPE = BOOT_QSPI
@@ -499,14 +586,22 @@ int main(void) {
 	while (1) {
 		usb.Process();
 		if (isUsbConfigured && !wasConfigLoadAttempted) {
-			LoadConfig();
+			bool success = LoadConfig();
+			if (!success) System::Delay(1000);
 			wasConfigLoadAttempted = true; // only try to load once
 		}
 		else if (isUsbConfigured && isConfigChanged) {
-			WriteConfig();
+			bool success = WriteConfig();
+			if (!success) System::Delay(1000);
 			isConfigChanged = false; // only try to save changed once
 		}
-		System::Delay(1);
+#if LOG_ENABLED
+		else if (isLogWritePending) {
+			bool success = WriteLog();
+			if (!success) System::Delay(1000);
+			isLogWritePending = false;
+		}
+#endif
 		// Update LEDs
 		float leftInAvg = 2.0 * leftInTotal * DFT_SIZE_RECIP;
 		float rightInAvg = 2.0 * rightInTotal * DFT_SIZE_RECIP;
@@ -523,5 +618,6 @@ int main(void) {
 		hw.SetLed(LED_5, 0.0, rightMid, 0.0); // green
 		hw.SetLed(LED_6, rightInAvg, 0.0, 0.0); // red
 		hw.WriteLeds();
+		System::Delay(1);
 	}
 }
