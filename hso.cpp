@@ -4,7 +4,7 @@
  * the ideas of harmonic stride and level into a spectral audio processor.
  *
  * Controls:
- *	- Warp: Base frequency coarse adjustment.  CV is exponential FM (ranging from -6 to +6 octaves).
+ *	- Warp: Base frequency coarse adjustment.  CV is exponential FM (ranging from -5 to +5 octaves).
  *	- Time: Base frequency fine adjusment (10% range of coarse).  CV is linear FM (20% of frequency).
  *	- Blur: Resonance, self-oscillation after 75% of knob range.
  *	- Reflect: Haromonic stride (distance between harmonics), ranging from 0 to 5.
@@ -106,8 +106,6 @@ const int BIN_COUNT = DFT_SIZE / 2;
 const double BIN_AMPLITUDE_RECIP = 2.0 / DFT_SIZE;
 const double FREQUENCY_TO_BIN = 2.0 / SAMPLE_RATE * BIN_COUNT;
 const double BIN_WIDTH = (SAMPLE_RATE / 2.0) / BIN_COUNT;
-const float STRIDE_EPSILON = 0.01; // arbitrary small value
-const float LEVEL_EPSILON = 0.01; // -40dB
 
 typedef float dft_t;
 
@@ -290,7 +288,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	// Time CV - linear FM (20% range of post-fine-adjustment freq)
 	baseFrequency += 0.2 * baseFrequency * hw.GetCvValue(CV_TIME);
 	// Warp CV - exponential FM
-	baseFrequency *= pow(2, hw.GetWarpVoct() / 10.0); // -2^6 to 2^6 of post-linear-FM frequency
+	baseFrequency *= pow(2, hw.GetWarpVoct() / 12.0); // -2^5 to 2^5 of post-linear-FM frequency
 
 	float rawResonance = hw.GetKnobValue(KNOB_BLUR) + hw.GetCvValue(CV_BLUR);
 	float resonance = fclamp(rawResonance, 0.0, 2.0);
