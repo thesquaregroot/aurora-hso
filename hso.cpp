@@ -33,6 +33,12 @@ using namespace daisysp;
 #define DFT_SIZE 4096
 #define OSCILLATOR_COUNT 4
 
+#define DFT_SIZE_RECIP (1.0 / DFT_SIZE);
+#define BIN_COUNT (DFT_SIZE / 2);
+#define BIN_AMPLITUDE_RECIP (2.0 / DFT_SIZE);
+#define FREQUENCY_TO_BIN (2.0 / SAMPLE_RATE * BIN_COUNT);
+#define BIN_WIDTH ((SAMPLE_RATE / 2.0) / BIN_COUNT);
+
 #define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
 #define HARMONIC_MIN 1
@@ -50,26 +56,34 @@ bool isUsbConfigured = false;
 bool wasConfigLoadAttempted = false;
 bool isConfigChanged = false;
 
-#define LOG_ENABLED 0
+// USB Drive IO
+//
+// These variables are global because they won't work
+// if they are declared on the stack.  The access methods
+// also appear to need to be called from main
+// (i.e. not from the audio callback).
+//
+// see: https://forum.electro-smith.com/t/error-reading-file-from-sd-card/3911
+FIL file;
+FRESULT fileResult;
+char configFilePath[100];
+char fileLineBuffer[100];
+
+// Logging
+#define LOG_ENABLED 1
 
 #if LOG_ENABLED
 #define LOG_FILE_NAME "HSO.log"
 #define LOG_ITERATIONS 1000
 #define SEC_TO_USEC 1000000
+const uint32_t USEC_FREQ = System::GetTickFreq() / SEC_TO_USEC;
+
 uint32_t logIteration = 0;
 uint32_t setupTotal = 0;
 uint32_t resonanceTotal = 0;
 uint32_t processTotal = 0;
 uint32_t outputTotal = 0;
 uint32_t callbackTotal = 0;
-
-TimerHandle createTimer(TimerHandle::Config::Peripheral peripheral) {
-	TimerHandle::Config config;
-	config.periph = peripheral;
-	TimerHandle timer;
-	timer.Init(config);
-	return timer;
-}
 
 FIL logFile;
 FRESULT logFileResult;
@@ -100,12 +114,6 @@ bool writeLog() {
 	return true;
 }
 #endif
-
-const double DFT_SIZE_RECIP = 1.0 / DFT_SIZE;
-const int BIN_COUNT = DFT_SIZE / 2;
-const double BIN_AMPLITUDE_RECIP = 2.0 / DFT_SIZE;
-const double FREQUENCY_TO_BIN = 2.0 / SAMPLE_RATE * BIN_COUNT;
-const double BIN_WIDTH = (SAMPLE_RATE / 2.0) / BIN_COUNT;
 
 typedef float dft_t;
 
@@ -159,8 +167,8 @@ inline float inverse_lerp(float c, float a, float b) {
 
 Oscillator leftOscillators[OSCILLATOR_COUNT];
 Oscillator rightOscillators[OSCILLATOR_COUNT];
-double leftResonance[AUDIO_BLOCK_SIZE];
-double rightResonance[AUDIO_BLOCK_SIZE];
+DTCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
+DTCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
 
 Switch reverseButton;
 bool isReverseActive = false;
@@ -175,12 +183,12 @@ DTCMRAM Buffer rightSignal; // input signal for right channel
 // variables for tracking averages (for LEDs)
 Buffer leftOuts; // output signal for left channel
 Buffer rightOuts; // output signal for right channel
-DTCMRAM double leftInTotal = 0;
-DTCMRAM double rightInTotal = 0;
-DTCMRAM double leftOutTotal = 0;
-DTCMRAM double rightOutTotal = 0;
+float leftInTotal = 0;
+float rightInTotal = 0;
+float leftOutTotal = 0;
+float rightOutTotal = 0;
 
-DTCMRAM Math<dft_t> math;
+// variables for DFT
 DTCMRAM ShyFFT<dft_t, DFT_SIZE> dft;
 DTCMRAM dft_t window[DFT_SIZE];
 
@@ -197,7 +205,7 @@ dft_t* rightSpectrumReal = rightSpectrum;
 dft_t* rightSpectrumImag = rightSpectrum + BIN_COUNT;
 
 dft_t indexPhase(size_t index) { return index / (dft_t)(DFT_SIZE-1); }
-dft_t hann(dft_t phase) { return 0.5 * (1 - cos(2 * math.pi() * phase)); }
+dft_t hann(dft_t phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
 
 void processSignals(float baseFrequency, float strideFactor, float levelFactor, float resonance) {
 	for (int i = 0; i < DFT_SIZE; i++) {
@@ -207,48 +215,45 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	dft.Direct(leftSignalBuffer, leftSpectrum);
 	dft.Direct(rightSignalBuffer, rightSpectrum);
 
-	double baseLevel = (1.0 + resonance) * BIN_AMPLITUDE_RECIP; // account for resonance boost and DFT scaling
+	/*float baseLevel = (1.0 + resonance) * BIN_AMPLITUDE_RECIP; // account for resonance boost and DFT scaling
 	size_t cutoffBin = baseFrequency * FREQUENCY_TO_BIN;
 	for (size_t bin = 0; bin < BIN_COUNT; bin++) {
-		double binLevel = baseLevel;
+		float binLevel = baseLevel;
 
 		// clear if below the cutoff
-		//bool shouldClear = (bin < cutoffBin); // isReverseActive ? (bin > cutoffBin) : (bin < cutoffBin);
-		//binLevel *= shouldClear ? 0 : 1;
+		bool shouldClear = (bin < cutoffBin); // isReverseActive ? (bin > cutoffBin) : (bin < cutoffBin);
+		binLevel *= shouldClear ? 0 : 1;
 
 		// determine appropriate level scale for bin
-		/*bool isFilter = isFreezeActive;
-		double binFrequency = (bin + 0.5) * BIN_WIDTH;
+		bool isFilter = isFreezeActive;
+		float binFrequency = (bin + 0.5) * BIN_WIDTH;
 		size_t nearestPartialIndex = fastlog2f(binFrequency / baseFrequency) / fastlog2f(1 + strideFactor);
 		size_t partialBin = baseFrequency * pow(1 + strideFactor, nearestPartialIndex) * FREQUENCY_TO_BIN;
 		bool hasDesiredPartial = partialBin == bin;
-		//binLevel *= hasDesiredPartial * (isFilter ? 1.0 : pow(levelFactor, nearestPartialIndex));
-		binLevel *= hasDesiredPartial;*/
+		binLevel *= hasDesiredPartial * (isFilter ? 1.0 : pow(levelFactor, nearestPartialIndex));
 
 		leftSpectrumReal[bin] *= binLevel;
 		leftSpectrumImag[bin] *= binLevel;
 		rightSpectrumReal[bin] *= binLevel;
 		rightSpectrumImag[bin] *= binLevel;
-	}
+	}*/
 	// perform inverse transform
-	dft.Inverse(leftSpectrum, signalBuffer);
-	dft.Inverse(rightSpectrum, signalBuffer+DFT_SIZE);
+	dft.Inverse(leftSpectrum, leftSignalBuffer);
+	dft.Inverse(rightSpectrum, rightSignalBuffer);
 }
 
-dft_t limit(dft_t value, dft_t previousValue) {
+dft_t limit(dft_t value) {
 	if (!isfinite(value)) {
-		return previousValue;
+		return 0.0;
 	}
 	return SoftClip(value);
 }
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size) {
 #if LOG_ENABLED
-	TimerHandle timer = createTimer(TimerHandle::Config::Peripheral::TIM_2);
-	uint32_t usecFreq = timer.GetFreq() / SEC_TO_USEC;
-	timer.Start();
-	uint32_t callbackStart = timer.GetTick();
-	uint32_t setupStart = timer.GetTick();
+	// get start of overall callback and first section
+	uint32_t callbackStart = System::GetTick();
+	uint32_t setupStart = System::GetTick();
 #endif
 	hw.ProcessAllControls();
 
@@ -303,17 +308,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 
 	float mix = fclamp(hw.GetKnobValue(KNOB_MIX) + hw.GetCvValue(CV_MIX), 0.0, 1.0);
 
-	// handle self-resonance
+	// handle self-oscillation
 #if LOG_ENABLED
-	uint32_t setupEnd = timer.GetTick();
-	setupTotal += (setupEnd - setupStart) / usecFreq;
-	uint32_t resonanceStart = timer.GetTick();
+	uint32_t setupEnd = System::GetTick();
+	setupTotal += (setupEnd - setupStart) / USEC_FREQ;
+	uint32_t resonanceStart = System::GetTick();
 #endif
-	memset(leftResonance, 0, sizeof(double)*AUDIO_BLOCK_SIZE);
-	memset(rightResonance, 0, sizeof(double)*AUDIO_BLOCK_SIZE);
-	double freq = baseFrequency;
-	double level = 1.0;
-	double levelTotal = 0.0;
+	memset(leftResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
+	memset(rightResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
+	float freq = baseFrequency;
+	float level = 1.0;
+	float levelTotal = 0.0;
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		Oscillator& l = leftOscillators[i];
 		Oscillator& r = rightOscillators[i];
@@ -329,33 +334,31 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		float highFreqDropoff = fclamp(inverse_lerp(freq, HARMONIC_MAX, HARMONIC_DROP_HIGH), 0.f, 1.f);
 		level *= levelFactor * min(lowFreqDropoff, highFreqDropoff);
 	}
+	float resonanceScale = selfOscillation / levelTotal;
+	for (size_t i = 0; i < size; i++) {
+		leftResonance[i] *= resonanceScale;
+		rightResonance[i] *= resonanceScale;
+	}
 #if LOG_ENABLED
-	uint32_t resonanceEnd = timer.GetTick();
-	resonanceTotal += (resonanceEnd - resonanceStart) / usecFreq;
-	uint32_t processStart = timer.GetTick();
+	uint32_t resonanceEnd = System::GetTick();
+	resonanceTotal += (resonanceEnd - resonanceStart) / USEC_FREQ;
+	uint32_t processStart = System::GetTick();
 #endif
 	processSignals(baseFrequency, strideFactor, levelFactor, resonance);
 #if LOG_ENABLED
-	uint32_t processEnd = timer.GetTick();
-	processTotal += (processEnd - processStart) / usecFreq;
-	uint32_t outputStart = timer.GetTick();
+	uint32_t processEnd = System::GetTick();
+	processTotal += (processEnd - processStart) / USEC_FREQ;
+	uint32_t outputStart = System::GetTick();
 #endif
 	for (size_t i = 0; i < size; i++) {
 		size_t index = DFT_SIZE/2 - size/2 + i; // read from center of processed signal
 		// get outputs
-		double leftRaw = leftSignalBuffer[index];
-		double rightRaw = rightSignalBuffer[index];
-		dft_t previousLeft = 0.0;
-		dft_t previousRight = 0.0;
-		if (leftOuts.size() > 0) {
-			previousLeft = leftOuts[leftOuts.size()-1];
-			previousRight = rightOuts[rightOuts.size()-1];
-		}
-		// adjust level for theoretical max of all haromincs (so level is 1 when all waves coincide)
-		double leftRes = selfOscillation * leftResonance[i] / levelTotal;
-		double rightRes = selfOscillation * rightResonance[i] / levelTotal;
-		dft_t leftValue = limit(leftRaw + leftRes, previousLeft);
-		dft_t rightValue = limit(rightRaw + rightRes, previousRight);
+		float leftRaw = leftSignalBuffer[index];
+		float rightRaw = rightSignalBuffer[index];
+		float leftRes = leftResonance[i];
+		float rightRes = rightResonance[i];
+		dft_t leftValue = limit(leftRaw + leftRes);
+		dft_t rightValue = limit(rightRaw + rightRes);
 		// store result
 		if (leftOuts.size() == DFT_SIZE) {
 			// remove oldest value from running total
@@ -372,11 +375,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 
 #if LOG_ENABLED
-	uint32_t outputEnd = timer.GetTick();
-	uint32_t callbackEnd = timer.GetTick();
-	timer.Stop();
-	outputTotal += (outputEnd - outputStart) / usecFreq;
-	callbackTotal += (callbackEnd - callbackStart) / usecFreq;
+	uint32_t outputEnd = System::GetTick();
+	uint32_t callbackEnd = System::GetTick();
+	outputTotal += (outputEnd - outputStart) / USEC_FREQ;
+	callbackTotal += (callbackEnd - callbackStart) / USEC_FREQ;
 	logIteration++;
 	if (logIteration % LOG_ITERATIONS == 0) {
 		// log totals
@@ -420,18 +422,6 @@ void USBDisconnectCallback(void* userdata) {
 void USBClassActiveCallback(void* userdata) {
 	isUsbConfigured = true;
 }
-
-// the following file IO variables are global
-// as they can't be declared on the stack
-//
-// access methods also appear to need to be called
-// from main (i.e. not from audio callback)
-//
-// see: https://forum.electro-smith.com/t/error-reading-file-from-sd-card/3911
-FIL file;
-FRESULT fileResult;
-char configFilePath[100];
-char fileLineBuffer[100];
 
 bool loadConfig() {
 	fileResult = f_open(&file, configFilePath, (FA_OPEN_EXISTING | FA_READ));
@@ -528,23 +518,25 @@ int main(void) {
 	srand(0);
 	while (1) {
 		usb.Process();
-		if (isUsbConfigured && !wasConfigLoadAttempted) {
-			bool success = loadConfig();
-			if (!success) System::Delay(1000);
-			wasConfigLoadAttempted = true; // only try to load once
-		}
-		else if (isUsbConfigured && isConfigChanged) {
-			bool success = writeConfig();
-			if (!success) System::Delay(1000);
-			isConfigChanged = false; // only try to save changed once
-		}
+		if (isUsbConfigured) {
+			if (!wasConfigLoadAttempted) {
+				bool success = loadConfig();
+				if (!success) System::Delay(1000);
+				wasConfigLoadAttempted = true; // only try to load once
+			}
+			else if (isConfigChanged) {
+				bool success = writeConfig();
+				if (!success) System::Delay(1000);
+				isConfigChanged = false; // only try to save changed once
+			}
 #if LOG_ENABLED
-		else if (isLogWritePending) {
-			bool success = writeLog();
-			if (!success) System::Delay(1000);
-			isLogWritePending = false;
-		}
+			else if (isLogWritePending) {
+				bool success = writeLog();
+				if (!success) System::Delay(1000);
+				isLogWritePending = false;
+			}
 #endif
+		}
 		// Update LEDs
 		float leftInAvg = 2.0 * leftInTotal * DFT_SIZE_RECIP;
 		float rightInAvg = 2.0 * rightInTotal * DFT_SIZE_RECIP;
@@ -561,5 +553,6 @@ int main(void) {
 		hw.SetLed(LED_5, 0.0, rightMid, 0.0); // green
 		hw.SetLed(LED_6, rightInAvg, 0.0, 0.0); // red
 		hw.WriteLeds();
+		System::Delay(1);
 	}
 }
