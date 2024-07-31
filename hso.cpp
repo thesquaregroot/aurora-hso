@@ -177,19 +177,19 @@ Switch freezeButton;
 bool isFreezeActive = false;
 bool isFreezeInverted = false; // flips gate interpretation, changed by user input
 
-DTCMRAM Buffer leftSignal; // input signal for left channel
-DTCMRAM Buffer rightSignal; // input signal for right channel
+ITCMRAM Buffer leftSignal; // input signal for left channel
+ITCMRAM Buffer rightSignal; // input signal for right channel
 
 // variables for tracking averages (for LEDs)
-Buffer leftOuts; // output signal for left channel
-Buffer rightOuts; // output signal for right channel
+ITCMRAM Buffer leftOuts; // output signal for left channel
+ITCMRAM Buffer rightOuts; // output signal for right channel
 float leftInTotal = 0;
 float rightInTotal = 0;
 float leftOutTotal = 0;
 float rightOutTotal = 0;
 
 // variables for DFT
-DTCMRAM ShyFFT<dft_t, DFT_SIZE> dft;
+ITCMRAM ShyFFT<dft_t, DFT_SIZE> dft;
 DTCMRAM dft_t window[DFT_SIZE];
 
 DTCMRAM dft_t signalBuffer[2*DFT_SIZE];
