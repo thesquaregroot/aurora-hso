@@ -169,8 +169,8 @@ inline float inverse_lerp(float c, float a, float b) {
 
 dft_t hann(dft_t phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
 
-Oscillator leftOscillators[OSCILLATOR_COUNT];
-Oscillator rightOscillators[OSCILLATOR_COUNT];
+ITCMRAM Oscillator leftOscillators[OSCILLATOR_COUNT];
+ITCMRAM Oscillator rightOscillators[OSCILLATOR_COUNT];
 DTCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
 DTCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
 
@@ -232,51 +232,35 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	float level = 1.0 + resonance;
 	size_t cutoffBin = frequency * FREQUENCY_TO_BIN;
 	size_t bin = cutoffBin;
-	float frequencyIncrement = frequency * strideFactor;
-	if (isFreezeActive || fabsf(frequencyIncrement) < BIN_WIDTH/2.0 || fabsf(strideFactor) < STRIDE_EPSILON) {
-		// copy contiguous chunks of spectrum
-		if (isFreezeActive || levelFactor > 1.0 - LEVEL_EPSILON) {
-			// no level adjustments, so we can copy more efficiently (and need to)
-			if (isReverseActive) {
-					// reverse -- low pass
-					size_t binsRemaining = bin + 1;
-					memcpy(leftProcessedReal, leftSpectrumReal, sizeof(dft_t)*binsRemaining);
-					memcpy(leftProcessedImag, leftSpectrumImag, sizeof(dft_t)*binsRemaining);
-					memcpy(rightProcessedReal, rightSpectrumReal, sizeof(dft_t)*binsRemaining);
-					memcpy(rightProcessedImag, rightSpectrumImag, sizeof(dft_t)*binsRemaining);
-			}
-			else {
-					// normal -- high pass
-					size_t binsRemaining = BIN_COUNT - bin;
-					memcpy(leftProcessedReal+bin, leftSpectrumReal+bin, sizeof(dft_t)*binsRemaining);
-					memcpy(leftProcessedImag+bin, leftSpectrumImag+bin, sizeof(dft_t)*binsRemaining);
-					memcpy(rightProcessedReal+bin, rightSpectrumReal+bin, sizeof(dft_t)*binsRemaining);
-					memcpy(rightProcessedImag+bin, rightSpectrumImag+bin, sizeof(dft_t)*binsRemaining);
-			}
-			// boost cutoff freqeuncy (resonance)
-			leftProcessedReal[cutoffBin] *= level;
-			leftProcessedImag[cutoffBin] *= level;
-			rightProcessedReal[cutoffBin] *= level;
-			rightProcessedImag[cutoffBin] *= level;
+	bool lowStride = (fabsf(strideFactor) < STRIDE_EPSILON);
+	bool highLevel = (levelFactor > 1.0 - LEVEL_EPSILON);
+	if (isFreezeActive || (lowStride && highLevel)) {
+		// copy specturm without level adjustments
+		if (isReverseActive) {
+			// reverse -- low pass
+			size_t binsRemaining = bin + 1;
+			memcpy(leftProcessedReal, leftSpectrumReal, sizeof(dft_t)*binsRemaining);
+			memcpy(leftProcessedImag, leftSpectrumImag, sizeof(dft_t)*binsRemaining);
+			memcpy(rightProcessedReal, rightSpectrumReal, sizeof(dft_t)*binsRemaining);
+			memcpy(rightProcessedImag, rightSpectrumImag, sizeof(dft_t)*binsRemaining);
 		}
 		else {
-			// rely on level decay to bail out in a timely fashion
-			int increment = isReverseActive ? -1 : 1;
-			while (bin > 0 && bin < BIN_COUNT) {
-				leftProcessedReal[bin] = level * leftSpectrumReal[bin];
-				leftProcessedImag[bin] = level * leftSpectrumImag[bin];
-				rightProcessedReal[bin] = level * rightSpectrumReal[bin];
-				rightProcessedImag[bin] = level * rightSpectrumImag[bin];
-				level *= levelFactor;
-				if (level < LEVEL_EPSILON) break;
-				bin += increment;
-			}
+			// normal -- high pass
+			size_t binsRemaining = BIN_COUNT - bin;
+			memcpy(leftProcessedReal+bin, leftSpectrumReal+bin, sizeof(dft_t)*binsRemaining);
+			memcpy(leftProcessedImag+bin, leftSpectrumImag+bin, sizeof(dft_t)*binsRemaining);
+			memcpy(rightProcessedReal+bin, rightSpectrumReal+bin, sizeof(dft_t)*binsRemaining);
+			memcpy(rightProcessedImag+bin, rightSpectrumImag+bin, sizeof(dft_t)*binsRemaining);
 		}
+		// boost cutoff freqeuncy (resonance)
+		leftProcessedReal[cutoffBin] *= level;
+		leftProcessedImag[cutoffBin] *= level;
+		rightProcessedReal[cutoffBin] *= level;
+		rightProcessedImag[cutoffBin] *= level;
 	}
 	else {
 		// transfer harmonic bin levels to processed spectrum
-		if (levelFactor > 1.0 - LEVEL_EPSILON) {
-			// most expensive operation, sparse placement but can't rely on level decay
+		if (highLevel) {
 			int increment = isReverseActive ? -1 : 1;
 			while (bin > 0 && bin < BIN_COUNT) {
 				leftProcessedReal[bin] = leftSpectrumReal[bin];
@@ -302,6 +286,7 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 				leftProcessedImag[bin] = level * leftSpectrumImag[bin];
 				rightProcessedReal[bin] = level * rightSpectrumReal[bin];
 				rightProcessedImag[bin] = level * rightSpectrumImag[bin];
+				if (lowStride) break;
 				// updates for next iteration
 				size_t nextBin = bin;
 				do {
