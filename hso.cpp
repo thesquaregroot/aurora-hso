@@ -38,7 +38,7 @@ using namespace daisysp;
 #define FREQUENCY_TO_BIN (2.0 / SAMPLE_RATE * BIN_COUNT)
 #define BIN_WIDTH ((SAMPLE_RATE / 2.0) / BIN_COUNT)
 
-#define FREQUENCY_EPSILON 1.0
+#define FREQUENCY_EPSILON (BIN_WIDTH / 2)
 #define STRIDE_EPSILON 0.01
 #define LEVEL_EPSILON 0.01
 
@@ -581,8 +581,8 @@ int main(void) {
 	// objects required for signal processing
 	dft.Init();
 	memset(window, 0, sizeof(dft_t)*DFT_SIZE);
-	size_t windowPadding = 2.0*AUDIO_BLOCK_SIZE;
-	size_t internalWidth = DFT_SIZE - 2*windowPadding;
+	const size_t windowPadding = AUDIO_BLOCK_SIZE;
+	const size_t internalWidth = DFT_SIZE - 2*windowPadding;
 	for (size_t i = windowPadding; i < DFT_SIZE - windowPadding; i++) {
 		window[i] = hann(((dft_t)i) / internalWidth);
 	}
