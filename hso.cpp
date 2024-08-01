@@ -38,6 +38,7 @@ using namespace daisysp;
 #define FREQUENCY_TO_BIN (2.0 / SAMPLE_RATE * BIN_COUNT)
 #define BIN_WIDTH ((SAMPLE_RATE / 2.0) / BIN_COUNT)
 
+#define FREQUENCY_EPSILON 1.0
 #define STRIDE_EPSILON 0.01
 #define LEVEL_EPSILON 0.01
 
@@ -218,6 +219,9 @@ dft_t* rightProcessed = processedSpectrumBuffer + DFT_SIZE;
 dft_t* rightProcessedReal = rightProcessed;
 dft_t* rightProcessedImag = rightProcessed + BIN_COUNT;
 
+float lastFrequency = 0;
+size_t lastBin = 0;
+
 void processSignals(float baseFrequency, float strideFactor, float levelFactor, float resonance) {
 	for (int i = 0; i < DFT_SIZE; i++) {
 		leftSignalBuffer[i] = leftSignal[i] * window[i];
@@ -230,7 +234,16 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 
 	float frequency = baseFrequency;
 	float level = 1.0 + resonance;
-	size_t cutoffBin = frequency * FREQUENCY_TO_BIN;
+	size_t cutoffBin;
+	// attempt to reduce jitter between bins, if frequency hasn't changed much, don't change bins
+	if (fabsf(frequency - lastFrequency) < FREQUENCY_EPSILON) {
+		cutoffBin = lastBin;
+	}
+	else {
+		cutoffBin = frequency * FREQUENCY_TO_BIN;
+		lastFrequency = frequency;
+		lastBin = cutoffBin;
+	}
 	size_t bin = cutoffBin;
 	bool lowStride = (fabsf(strideFactor) < STRIDE_EPSILON);
 	bool highLevel = (levelFactor > 1.0 - LEVEL_EPSILON);
