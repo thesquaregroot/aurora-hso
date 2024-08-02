@@ -11,7 +11,7 @@
  *				stride can go through-zero and become negative (see Reverse).
  *	- Atomosphere: Harmonic level (relative level of each harmonic), ranging from 0 to 1.
  *	- Mix: Blend between dry signal and processed signal.
- *	- Reverse: Change sign of stride (generate/collect subharmonics instead).
+ *	- Reverse: Changes sign of stride (generate/collect subharmonics instead).
  *	- Freeze: Filter cutoff mode.  Treats the frequency as a cutoff frequency, passing all DFT bins
  *				above (or below if reverse is active), essentially becoming a high-pass (or low-pass)
  *				brick wall filter.  This is the same as when stride is 0 and level is 1.
@@ -31,7 +31,7 @@ using namespace daisysp;
 #define SAMPLE_RATE 48000
 #define AUDIO_BLOCK_SIZE 256
 #define DFT_SIZE 4096
-#define OSCILLATOR_COUNT 8
+#define OSCILLATOR_COUNT 10
 
 #define DFT_SIZE_RECIP (1.0 / DFT_SIZE)
 #define BIN_COUNT (DFT_SIZE / 2)
@@ -223,6 +223,21 @@ dft_t* rightProcessedImag = rightProcessed + BIN_COUNT;
 float lastFrequency = 0;
 size_t lastBin = 0;
 
+float GetFrequency(float baseFrequency, float strideFactor, size_t index) {
+	// When stride is positive, we target multiples of the frequency.
+	// When stride is negative, we target divisions of the frequency.
+	//
+	// When stride = 1, this corresponds to harmonics (all integer multiples) or overtones
+	// When stride = -1, this corresponds to subharmonics (integer submultiples) or undertones
+	//
+	// General formulas:
+	//   positive stride: f_n = f_0 * (1 + n*s)
+	//   negative stride: f_n = f_0 / (1 - n*s)
+	return (strideFactor >= 0) ?
+			baseFrequency * (1 + index * strideFactor) :
+			baseFrequency / (1 - index * strideFactor);
+}
+
 void processSignals(float baseFrequency, float strideFactor, float levelFactor, float resonance) {
 	for (int i = 0; i < DFT_SIZE; i++) {
 		leftSignalBuffer[i] = leftSignal[i] * window[i];
@@ -273,6 +288,7 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		rightProcessedImag[cutoffBin] *= level;
 	}
 	else {
+		size_t partialIndex = 0;
 		// transfer harmonic bin levels to processed spectrum
 		if (highLevel) {
 			// no level decay, use the same level throughout
@@ -284,10 +300,10 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 				rightProcessedReal[bin] = level * rightSpectrumReal[bin];
 				rightProcessedImag[bin] = level * rightSpectrumImag[bin];
 				// updates for next iteration
-				float ratioFrequency = (strideFactor < 0) ? frequency : baseFrequency;
-				frequency += ratioFrequency * strideFactor;
+				frequency = GetFrequency(baseFrequency, strideFactor, partialIndex);
 				size_t nextBin = frequency * FREQUENCY_TO_BIN;
 				bin = (bin == nextBin) ? bin + increment : nextBin;
+				partialIndex++;
 			}
 		}
 		else {
@@ -304,9 +320,9 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 				do {
 					level *= levelFactor;
 					if (level < LEVEL_EPSILON) goto idft; // "break 2"
-					float ratioFrequency = (strideFactor < 0) ? frequency : baseFrequency;
-					frequency += ratioFrequency * strideFactor;
+					frequency = GetFrequency(baseFrequency, strideFactor, partialIndex);
 					nextBin = frequency * FREQUENCY_TO_BIN;
+					partialIndex++;
 				} while (nextBin == bin);
 				bin = nextBin;
 			}
@@ -372,20 +388,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	// Reflect Knob/CV - stride
 	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT);
 	float strideFactor = (isReverseActive ? -5.0 : 5.0) * rawStride;
-	// When stride is negative, an exponential scaling is used to ensure harmonics
-	// get closer together as the frequency decreases and fill the frequency space below
-	// the cutoff (consistent with low-pass behavior when reverse is active).
-	//
-	//   0.0: -1 + 2^(0.0)  = 0
-	//   1.0: -1 + 2^(-1.0) = -1/2  (one octave down)
-	//   2.0: -1 + 2^(-2.0) = -3/4  (two octaves down)
-	//   3.0: -1 + 2^(-3.0) = -7/8  (etc.)
-	//   4.0: -1 + 2^(-4.0) = -15/16
-	//   5.0: -1 + 2^(-5.0) = -31/32
-	//
-	//   e.g. 400 + (-3/4)*400 = 100
-	float negativeStrideFactor = -1.0 + powf(2.0, strideFactor); // making this branchless helped performance
-	strideFactor = (strideFactor >= 0) ? strideFactor : negativeStrideFactor;
 
 	// Atmosphere Knob/CV - level
 	float rawLevel = hw.GetKnobValue(KNOB_ATMOSPHERE) + hw.GetCvValue(CV_ATMOSPHERE);
@@ -438,8 +440,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			rightResonance[j] += level * r.Process();
 		}
 		levelTotal += level;
-		float ratioFrequency = (strideFactor < 0) ? frequency : baseFrequency;
-		frequency += ratioFrequency * strideFactor;
+		frequency = GetFrequency(baseFrequency, strideFactor, i);
 		float lowFreqDropoff = fclamp(inverse_lerp(frequency, HARMONIC_MIN, HARMONIC_DROP_LOW), 0.f, 1.f);
 		float highFreqDropoff = fclamp(inverse_lerp(frequency, HARMONIC_MAX, HARMONIC_DROP_HIGH), 0.f, 1.f);
 		level *= levelFactor * min(lowFreqDropoff, highFreqDropoff);
