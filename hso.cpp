@@ -4,16 +4,17 @@
  * the ideas of harmonic stride and level into a spectral audio processor.
  *
  * Controls:
- *	- Warp: Base frequency coarse adjustment.  CV is exponential FM (ranging from -5 to +5 octaves).
+ *	- Warp: Base frequency coarse adjustment.  CV is exponential FM (V/oct, ranging from -5 to +5 octaves).
  *	- Time: Base frequency fine adjusment (10% range of coarse).  CV is linear FM (20% of frequency).
- *	- Blur: Resonance, self-oscillation after 75% of knob range.
- *	- Reflect: Haromonic stride (distance between harmonics), ranging from 0 to 5.
+ *	- Blur: Resonance, with self-oscillation after 75% of knob range.
+ *	- Reflect: Haromonic stride (distance between harmonics), ranging from 0 to 5.  However, with CV,
+ *				stride can go through-zero and become negative (see Reverse).
  *	- Atomosphere: Harmonic level (relative level of each harmonic), ranging from 0 to 1.
  *	- Mix: Blend between dry signal and processed signal.
  *	- Reverse: Change sign of stride (generate/collect subharmonics instead).
- *	- Freeze: Filter cutoff mode. This treats the stride as 0 for input processing, effectively becoming
- *				a brick-wall high-pass (or, if reverse is activated, low-pass) filter with resonance character
- *				determined by stride/level controls.
+ *	- Freeze: Filter cutoff mode.  Treats the frequency as a cutoff frequency, passing all DFT bins
+ *				above (or below if reverse is active), essentially becoming a high-pass (or low-pass)
+ *				brick wall filter.  This is the same as when stride is 0 and level is 1.
  */
 #include <string>
 #include <cmath> // for isfinite
@@ -168,7 +169,7 @@ inline float inverse_lerp(float c, float a, float b) {
 	return (c - a) / (b - a);
 }
 
-dft_t hann(dft_t phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
+dft_t hann(double phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
 
 ITCMRAM Oscillator leftOscillators[OSCILLATOR_COUNT];
 ITCMRAM Oscillator rightOscillators[OSCILLATOR_COUNT];
@@ -274,22 +275,20 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	else {
 		// transfer harmonic bin levels to processed spectrum
 		if (highLevel) {
+			// no level decay, use the same level throughout
 			int increment = isReverseActive ? -1 : 1;
 			while (bin > 0 && bin < BIN_COUNT) {
-				leftProcessedReal[bin] = leftSpectrumReal[bin];
-				leftProcessedImag[bin] = leftSpectrumImag[bin];
-				rightProcessedReal[bin] = rightSpectrumReal[bin];
-				rightProcessedImag[bin] = rightSpectrumImag[bin];
+				// still need to multiply by level here to account for resonance
+				leftProcessedReal[bin] = level * leftSpectrumReal[bin];
+				leftProcessedImag[bin] = level * leftSpectrumImag[bin];
+				rightProcessedReal[bin] = level * rightSpectrumReal[bin];
+				rightProcessedImag[bin] = level * rightSpectrumImag[bin];
 				// updates for next iteration
-				frequency += frequency * strideFactor;
+				float ratioFrequency = (strideFactor < 0) ? frequency : baseFrequency;
+				frequency += ratioFrequency * strideFactor;
 				size_t nextBin = frequency * FREQUENCY_TO_BIN;
 				bin = (bin == nextBin) ? bin + increment : nextBin;
 			}
-			// boost cutoff freqeuncy (resonance)
-			leftProcessedReal[cutoffBin] *= level;
-			leftProcessedImag[cutoffBin] *= level;
-			rightProcessedReal[cutoffBin] *= level;
-			rightProcessedImag[cutoffBin] *= level;
 		}
 		else {
 			// sparse placement, but level decay allows us to bail out before too long
@@ -305,7 +304,8 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 				do {
 					level *= levelFactor;
 					if (level < LEVEL_EPSILON) goto idft; // "break 2"
-					frequency += frequency * strideFactor;
+					float ratioFrequency = (strideFactor < 0) ? frequency : baseFrequency;
+					frequency += ratioFrequency * strideFactor;
 					nextBin = frequency * FREQUENCY_TO_BIN;
 				} while (nextBin == bin);
 				bin = nextBin;
@@ -361,24 +361,43 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	// Time CV - linear FM (20% range of post-fine-adjustment freq)
 	baseFrequency += 0.2 * baseFrequency * hw.GetCvValue(CV_TIME);
 	// Warp CV - exponential FM
-	baseFrequency *= pow(2, hw.GetWarpVoct() / 12.0); // -2^5 to 2^5 of post-linear-FM frequency
+	baseFrequency *= powf(2.0, hw.GetWarpVoct() / 12.0); // -2^5 to 2^5 of post-linear-FM frequency
 
+	// Blur Knob/CV - resonance
 	float rawResonance = hw.GetKnobValue(KNOB_BLUR) + hw.GetCvValue(CV_BLUR);
 	float resonance = fclamp(rawResonance, 0.0, 2.0);
 	float selfOscillation = fmap(4.0*(resonance - 0.75), 0.0, 1.0);
-	selfOscillation = pow(selfOscillation, 2.0); // quadratic curve
+	selfOscillation = selfOscillation * selfOscillation; // quadratic curve
 
+	// Reflect Knob/CV - stride
 	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT);
-	float strideFactor = (isReverseActive ? -0.1 : 1) * fmap(rawStride, 0.0, 5.0, Mapping::LINEAR);
+	float strideFactor = (isReverseActive ? -5.0 : 5.0) * rawStride;
+	// When stride is negative, an exponential scaling is used to ensure harmonics
+	// get closer together as the frequency decreases and fill the frequency space below
+	// the cutoff (consistent with low-pass behavior when reverse is active).
+	//
+	//   0.0: -1 + 2^(0.0)  = 0
+	//   1.0: -1 + 2^(-1.0) = -1/2  (one octave down)
+	//   2.0: -1 + 2^(-2.0) = -3/4  (two octaves down)
+	//   3.0: -1 + 2^(-3.0) = -7/8  (etc.)
+	//   4.0: -1 + 2^(-4.0) = -15/16
+	//   5.0: -1 + 2^(-5.0) = -31/32
+	//
+	//   e.g. 400 + (-3/4)*400 = 100
+	float negativeStrideFactor = -1.0 + powf(2.0, strideFactor); // making this branchless helped performance
+	strideFactor = (strideFactor >= 0) ? strideFactor : negativeStrideFactor;
 
+	// Atmosphere Knob/CV - level
 	float rawLevel = hw.GetKnobValue(KNOB_ATMOSPHERE) + hw.GetCvValue(CV_ATMOSPHERE);
 	float levelFactor = fmap(rawLevel, 0.0, 1.0, Mapping::LINEAR);
 
+	// Mix Knob/CV - mix
 	float mix = fclamp(hw.GetKnobValue(KNOB_MIX) + hw.GetCvValue(CV_MIX), 0.0, 1.0);
 
+	// Collect input signals
 	for (size_t i = 0; i < size; i++) {
+		// update running totals
 		if (leftSignal.size() == DFT_SIZE) {
-			// remove oldest value from running total
 			leftInTotal -= fabsf(leftSignal[0]);
 			rightInTotal -= fabsf(rightSignal[0]);
 		}
@@ -406,22 +425,23 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	// handle self-oscillation
 	memset(leftResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
 	memset(rightResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
-	float freq = baseFrequency;
+	float frequency = baseFrequency;
 	float level = 1.0;
 	float levelTotal = 0.0;
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		Oscillator& l = leftOscillators[i];
 		Oscillator& r = rightOscillators[i];
-		l.SetFreq(freq);
-		r.SetFreq(freq);
+		l.SetFreq(frequency);
+		r.SetFreq(frequency);
 		for (size_t j = 0; j < size; j++) {
 			leftResonance[j] += level * l.Process();
 			rightResonance[j] += level * r.Process();
 		}
 		levelTotal += level;
-		freq += freq * strideFactor;
-		float lowFreqDropoff = fclamp(inverse_lerp(freq, HARMONIC_MIN, HARMONIC_DROP_LOW), 0.f, 1.f);
-		float highFreqDropoff = fclamp(inverse_lerp(freq, HARMONIC_MAX, HARMONIC_DROP_HIGH), 0.f, 1.f);
+		float ratioFrequency = (strideFactor < 0) ? frequency : baseFrequency;
+		frequency += ratioFrequency * strideFactor;
+		float lowFreqDropoff = fclamp(inverse_lerp(frequency, HARMONIC_MIN, HARMONIC_DROP_LOW), 0.f, 1.f);
+		float highFreqDropoff = fclamp(inverse_lerp(frequency, HARMONIC_MAX, HARMONIC_DROP_HIGH), 0.f, 1.f);
 		level *= levelFactor * min(lowFreqDropoff, highFreqDropoff);
 	}
 	float resonanceScale = selfOscillation / levelTotal;
@@ -445,14 +465,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		float rightRes = rightResonance[i];
 		dft_t leftValue = limit(leftRaw + leftRes);
 		dft_t rightValue = limit(rightRaw + rightRes);
-		// store result
+		// update running totals
 		if (leftOuts.size() == DFT_SIZE) {
-			// remove oldest value from running total
 			leftOutTotal -= fabsf(leftOuts[0]);
 			rightOutTotal -= fabsf(rightOuts[0]);
 		}
 		leftOutTotal += fabsf(leftValue);
 		rightOutTotal += fabsf(rightValue);
+		// store new values
 		leftOuts.put(leftValue);
 		rightOuts.put(rightValue);
 		// mix with input signal (with same delay)
@@ -583,8 +603,8 @@ int main(void) {
 	memset(window, 0, sizeof(dft_t)*DFT_SIZE);
 	const size_t windowPadding = AUDIO_BLOCK_SIZE;
 	const size_t internalWidth = DFT_SIZE - 2*windowPadding;
-	for (size_t i = windowPadding; i < DFT_SIZE - windowPadding; i++) {
-		window[i] = hann(((dft_t)i) / internalWidth);
+	for (size_t i = windowPadding; i < internalWidth; i++) {
+		window[i] = hann(i / (double)internalWidth);
 	}
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		_initOsc(leftOscillators[i], false); // sines
@@ -634,12 +654,12 @@ int main(void) {
 		float rightMid = (rightInAvg + rightOutAvg) / 2;
 		hw.SetLed(LED_REVERSE, isReverseActive ? colorWhite : colorOff);
 		hw.SetLed(LED_FREEZE, isFreezeActive ? colorWhite : colorOff);
-		hw.SetLed(LED_1, leftInAvg, 0.0, 0.0); // red
-		hw.SetLed(LED_2, 0.0, leftMid, 0.0); // green
-		hw.SetLed(LED_3, 0.5*leftOutAvg, 0.0, leftOutAvg); // purple
-		hw.SetLed(LED_4, 0.5*rightOutAvg, 0.0, rightOutAvg); // purple
-		hw.SetLed(LED_5, 0.0, rightMid, 0.0); // green
-		hw.SetLed(LED_6, rightInAvg, 0.0, 0.0); // red
+		hw.SetLed(LED_1, 0.0, leftInAvg, 0.25*leftInAvg); // green
+		hw.SetLed(LED_2, 0.0, leftMid, leftMid); // cyan
+		hw.SetLed(LED_3, 0.25*leftOutAvg, 0.0, leftOutAvg); // purple
+		hw.SetLed(LED_4, 0.25*rightOutAvg, 0.0, rightOutAvg); // purple
+		hw.SetLed(LED_5, 0.0, rightMid, rightMid); // cyan
+		hw.SetLed(LED_6, 0.0, rightInAvg, 0.25*rightInAvg); // green
 		hw.WriteLeds();
 	}
 }
