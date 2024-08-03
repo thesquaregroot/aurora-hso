@@ -31,7 +31,7 @@ using namespace daisysp;
 #define SAMPLE_RATE 48000
 #define AUDIO_BLOCK_SIZE 256
 #define DFT_SIZE 4096
-#define OSCILLATOR_COUNT 10
+#define OSCILLATOR_COUNT 8
 
 #define DFT_SIZE_RECIP (1.0 / DFT_SIZE)
 #define BIN_COUNT (DFT_SIZE / 2)
@@ -176,17 +176,16 @@ ITCMRAM Oscillator rightOscillators[OSCILLATOR_COUNT];
 DTCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
 DTCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
 
-Switch reverseButton;
+const Switch* reverseButton;
 bool isReverseActive = false;
 bool isReverseInverted = false; // flips gate interpretation, changed by user input
-Switch freezeButton;
+const Switch* freezeButton;
 bool isFreezeActive = false;
 bool isFreezeInverted = false; // flips gate interpretation, changed by user input
 
-ITCMRAM Buffer leftSignal; // input signal for left channel
-ITCMRAM Buffer rightSignal; // input signal for right channel
-
 // variables for tracking averages (for LEDs)
+ITCMRAM Buffer leftSignal; // input signal for left channel (also used for mix)
+ITCMRAM Buffer rightSignal; // input signal for right channel (also used for mix)
 ITCMRAM Buffer leftOuts; // output signal for left channel
 ITCMRAM Buffer rightOuts; // output signal for right channel
 float leftInTotal = 0;
@@ -223,7 +222,7 @@ dft_t* rightProcessedImag = rightProcessed + BIN_COUNT;
 float lastFrequency = 0;
 size_t lastBin = 0;
 
-float GetFrequency(float baseFrequency, float strideFactor, size_t index) {
+inline float GetFrequency(const float baseFrequency, const float strideFactor, const size_t index) {
 	// When stride is positive, we target multiples of the frequency.
 	// When stride is negative, we target divisions of the frequency.
 	//
@@ -354,13 +353,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 #endif
 	hw.ProcessAllControls();
 
-	reverseButton.Debounce();
-	if (reverseButton.RisingEdge()) {
+	if (reverseButton->RisingEdge()) {
 		isReverseInverted = !isReverseInverted;
 		isConfigChanged = true;
 	}
-	freezeButton.Debounce();
-	if (freezeButton.RisingEdge()) {
+	if (freezeButton->RisingEdge()) {
 		isFreezeInverted = !isFreezeInverted;
 		isConfigChanged = true;
 	}
@@ -435,15 +432,16 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		Oscillator& r = rightOscillators[i];
 		l.SetFreq(frequency);
 		r.SetFreq(frequency);
-		for (size_t j = 0; j < size; j++) {
-			leftResonance[j] += level * l.Process();
-			rightResonance[j] += level * r.Process();
-		}
 		levelTotal += level;
-		frequency = GetFrequency(baseFrequency, strideFactor, i);
 		float lowFreqDropoff = fclamp(inverse_lerp(frequency, HARMONIC_MIN, HARMONIC_DROP_LOW), 0.f, 1.f);
 		float highFreqDropoff = fclamp(inverse_lerp(frequency, HARMONIC_MAX, HARMONIC_DROP_HIGH), 0.f, 1.f);
-		level *= levelFactor * min(lowFreqDropoff, highFreqDropoff);
+		float partialLevel = levelFactor * min(lowFreqDropoff, highFreqDropoff);
+		for (size_t j = 0; j < size; j++) {
+			leftResonance[j] += partialLevel * l.Process();
+			rightResonance[j] += partialLevel * r.Process();
+		}
+		frequency = GetFrequency(baseFrequency, strideFactor, i);
+		level *= levelFactor;
 	}
 	float resonanceScale = selfOscillation / levelTotal;
 	for (size_t i = 0; i < size; i++) {
@@ -612,8 +610,8 @@ int main(void) {
 		_initOsc(rightOscillators[i], true); // cosines
 	}
 
-	reverseButton = hw.GetButton(SW_REVERSE);
-	freezeButton = hw.GetButton(SW_FREEZE);
+	reverseButton = &hw.GetButton(SW_REVERSE);
+	freezeButton = &hw.GetButton(SW_FREEZE);
 
 	// ready to start audio
 	hw.SetAudioBlockSize(AUDIO_BLOCK_SIZE);
@@ -655,12 +653,15 @@ int main(void) {
 		float rightMid = (rightInAvg + rightOutAvg) / 2;
 		hw.SetLed(LED_REVERSE, isReverseActive ? colorWhite : colorOff);
 		hw.SetLed(LED_FREEZE, isFreezeActive ? colorWhite : colorOff);
-		hw.SetLed(LED_1, 0.0, leftInAvg, 0.25*leftInAvg); // green
-		hw.SetLed(LED_2, 0.0, leftMid, leftMid); // cyan
-		hw.SetLed(LED_3, 0.25*leftOutAvg, 0.0, leftOutAvg); // purple
-		hw.SetLed(LED_4, 0.25*rightOutAvg, 0.0, rightOutAvg); // purple
-		hw.SetLed(LED_5, 0.0, rightMid, rightMid); // cyan
-		hw.SetLed(LED_6, 0.0, rightInAvg, 0.25*rightInAvg); // green
+		// input levels (purple)
+		hw.SetLed(LED_1, 0.5*leftInAvg, 0.0, leftInAvg);
+		hw.SetLed(LED_4, 0.5*rightInAvg, 0.0, rightInAvg);
+		// blend (cyan)
+		hw.SetLed(LED_2, 0.0, leftMid, leftMid);
+		hw.SetLed(LED_5, 0.0, rightMid, rightMid);
+		// output levels (green)
+		hw.SetLed(LED_3, 0.0, leftOutAvg, 0.25*leftOutAvg);
+		hw.SetLed(LED_6, 0.0, rightOutAvg, 0.25*rightOutAvg);
 		hw.WriteLeds();
 	}
 }
