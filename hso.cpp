@@ -36,17 +36,17 @@ using namespace daisysp;
 #define DFT_SIZE_RECIP (1.0 / DFT_SIZE)
 #define BIN_COUNT (DFT_SIZE / 2)
 #define BIN_AMPLITUDE_RECIP (2.0 / DFT_SIZE)
-#define FREQUENCY_TO_BIN (2.0 / SAMPLE_RATE * BIN_COUNT)
-#define BIN_WIDTH ((SAMPLE_RATE / 2.0) / BIN_COUNT)
+#define NYQUIST_LIMIT (SAMPLE_RATE / 2.0)
+#define FREQUENCY_TO_BIN (BIN_COUNT / NYQUIST_LIMIT)
+#define BIN_WIDTH (NYQUIST_LIMIT / BIN_COUNT)
 
 #define FREQUENCY_EPSILON (BIN_WIDTH / 2)
-#define STRIDE_EPSILON 0.01
-#define LEVEL_EPSILON 0.01
+#define STRIDE_EPSILON (BIN_WIDTH / NYQUIST_LIMIT)
 
-#define FREQUENCY_MIN 20
+#define FREQUENCY_MIN 1
 #define FREQUENCY_MAX 16000
-#define HARMONIC_MIN 1
-#define HARMONIC_DROP_LOW 5
+#define HARMONIC_MIN 20
+#define HARMONIC_DROP_LOW 40
 #define HARMONIC_DROP_HIGH 20000
 #define HARMONIC_MAX 24000
 
@@ -83,11 +83,11 @@ char fileLineBuffer[100];
 const uint32_t USEC_FREQ = System::GetTickFreq() / SEC_TO_USEC;
 
 uint32_t logIteration = 0;
-uint32_t setupTotal = 0;
-uint32_t resonanceTotal = 0;
-uint32_t processTotal = 0;
-uint32_t outputTotal = 0;
-uint32_t callbackTotal = 0;
+uint32_t setupTime = 0;
+uint32_t resonanceTime = 0;
+uint32_t processTime = 0;
+uint32_t outputTime = 0;
+uint32_t callbackTime = 0;
 
 FIL logFile;
 FRESULT logFileResult;
@@ -173,8 +173,8 @@ dft_t hann(double phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
 
 ITCMRAM Oscillator leftOscillators[OSCILLATOR_COUNT];
 ITCMRAM Oscillator rightOscillators[OSCILLATOR_COUNT];
-DTCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
-DTCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
+ITCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
+ITCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
 
 const Switch* reverseButton;
 bool isReverseActive = false;
@@ -222,6 +222,12 @@ dft_t* rightProcessedImag = rightProcessed + BIN_COUNT;
 float lastFrequency = 0;
 size_t lastBin = 0;
 
+inline float AbsNonZero(const float x, const float epsilon) {
+	// fairly linear curve on both sides, but rounded near zero (so that value never becomes zero)
+	// note that this is continuous and always positive
+	return sqrt(x*x + epsilon);
+}
+
 inline float GetFrequency(const float baseFrequency, const float strideFactor, const size_t index) {
 	// When stride is positive, we target multiples of the frequency.
 	// When stride is negative, we target divisions of the frequency.
@@ -245,28 +251,20 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	dft.Direct(leftSignalBuffer, leftSpectrum);
 	dft.Direct(rightSignalBuffer, rightSpectrum);
 
-	memset(processedSpectrumBuffer, 0, sizeof(dft_t)*2*DFT_SIZE); // clear any existing spectrum data
+	bool shouldKeepFrequency = fabsf(baseFrequency - lastFrequency) < FREQUENCY_EPSILON;
+	float frequency = shouldKeepFrequency ? lastFrequency : baseFrequency;
+	size_t cutoffBin = shouldKeepFrequency ? lastBin : (baseFrequency * FREQUENCY_TO_BIN);
+	lastFrequency = frequency;
+	lastBin = cutoffBin;
 
-	float frequency = baseFrequency;
-	float level = 1.0 + resonance;
-	size_t cutoffBin;
-	// attempt to reduce jitter between bins, if frequency hasn't changed much, don't change bins
-	if (fabsf(frequency - lastFrequency) < FREQUENCY_EPSILON) {
-		cutoffBin = lastBin;
-	}
-	else {
-		cutoffBin = frequency * FREQUENCY_TO_BIN;
-		lastFrequency = frequency;
-		lastBin = cutoffBin;
-	}
-	size_t bin = cutoffBin;
-	bool lowStride = (fabsf(strideFactor) < STRIDE_EPSILON);
-	bool highLevel = (levelFactor > 1.0 - LEVEL_EPSILON);
-	if (isFreezeActive || (lowStride && highLevel)) {
+	float baseLevel = 1.0 + resonance;
+	if (isFreezeActive) {
+		memset(processedSpectrumBuffer, 0, sizeof(dft_t)*2*DFT_SIZE); // clear any existing spectrum data
+
 		// copy specturm without level adjustments
 		if (isReverseActive) {
 			// reverse -- low pass
-			size_t binsRemaining = bin + 1;
+			size_t binsRemaining = cutoffBin + 1;
 			memcpy(leftProcessedReal, leftSpectrumReal, sizeof(dft_t)*binsRemaining);
 			memcpy(leftProcessedImag, leftSpectrumImag, sizeof(dft_t)*binsRemaining);
 			memcpy(rightProcessedReal, rightSpectrumReal, sizeof(dft_t)*binsRemaining);
@@ -274,60 +272,42 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		}
 		else {
 			// normal -- high pass
-			size_t binsRemaining = BIN_COUNT - bin;
-			memcpy(leftProcessedReal+bin, leftSpectrumReal+bin, sizeof(dft_t)*binsRemaining);
-			memcpy(leftProcessedImag+bin, leftSpectrumImag+bin, sizeof(dft_t)*binsRemaining);
-			memcpy(rightProcessedReal+bin, rightSpectrumReal+bin, sizeof(dft_t)*binsRemaining);
-			memcpy(rightProcessedImag+bin, rightSpectrumImag+bin, sizeof(dft_t)*binsRemaining);
+			size_t binsRemaining = BIN_COUNT - cutoffBin;
+			memcpy(leftProcessedReal+cutoffBin, leftSpectrumReal+cutoffBin, sizeof(dft_t)*binsRemaining);
+			memcpy(leftProcessedImag+cutoffBin, leftSpectrumImag+cutoffBin, sizeof(dft_t)*binsRemaining);
+			memcpy(rightProcessedReal+cutoffBin, rightSpectrumReal+cutoffBin, sizeof(dft_t)*binsRemaining);
+			memcpy(rightProcessedImag+cutoffBin, rightSpectrumImag+cutoffBin, sizeof(dft_t)*binsRemaining);
 		}
 		// boost cutoff freqeuncy (resonance)
-		leftProcessedReal[cutoffBin] *= level;
-		leftProcessedImag[cutoffBin] *= level;
-		rightProcessedReal[cutoffBin] *= level;
-		rightProcessedImag[cutoffBin] *= level;
+		leftProcessedReal[cutoffBin] *= baseLevel;
+		leftProcessedImag[cutoffBin] *= baseLevel;
+		rightProcessedReal[cutoffBin] *= baseLevel;
+		rightProcessedImag[cutoffBin] *= baseLevel;
 	}
 	else {
-		size_t partialIndex = 0;
-		// transfer harmonic bin levels to processed spectrum
-		if (highLevel) {
-			// no level decay, use the same level throughout
-			int increment = isReverseActive ? -1 : 1;
-			while (bin > 0 && bin < BIN_COUNT) {
-				// still need to multiply by level here to account for resonance
-				leftProcessedReal[bin] = level * leftSpectrumReal[bin];
-				leftProcessedImag[bin] = level * leftSpectrumImag[bin];
-				rightProcessedReal[bin] = level * rightSpectrumReal[bin];
-				rightProcessedImag[bin] = level * rightSpectrumImag[bin];
-				// updates for next iteration
-				frequency = GetFrequency(baseFrequency, strideFactor, partialIndex);
-				size_t nextBin = frequency * FREQUENCY_TO_BIN;
-				bin = (bin == nextBin) ? bin + increment : nextBin;
-				partialIndex++;
-			}
-		}
-		else {
-			// sparse placement, but level decay allows us to bail out before too long
-			while (bin > 0 && bin < BIN_COUNT) {
-				// transfer harmonic bin levels to processed spectrum
-				leftProcessedReal[bin] = level * leftSpectrumReal[bin];
-				leftProcessedImag[bin] = level * leftSpectrumImag[bin];
-				rightProcessedReal[bin] = level * rightSpectrumReal[bin];
-				rightProcessedImag[bin] = level * rightSpectrumImag[bin];
-				if (lowStride) break;
-				// updates for next iteration
-				size_t nextBin = bin;
-				do {
-					level *= levelFactor;
-					if (level < LEVEL_EPSILON) goto idft; // "break 2"
-					frequency = GetFrequency(baseFrequency, strideFactor, partialIndex);
-					nextBin = frequency * FREQUENCY_TO_BIN;
-					partialIndex++;
-				} while (nextBin == bin);
-				bin = nextBin;
-			}
+		float safeStride = AbsNonZero(strideFactor, STRIDE_EPSILON);
+		// sparse placement, but level decay allows us to bail out before too long
+		for (size_t bin = 0; bin < BIN_COUNT; bin++) {
+			// calculate nearest partial frequency and check if it's in this bin
+			// for positive stride,  n = (f_n / f_0 - 1) / s
+			// for negative stride,  n = (f_0 / f_n - 1) / -s
+			float binFrequency = (bin + 0.5f) * BIN_WIDTH;
+			float posFrequencyRatio = binFrequency / frequency;
+			float negFrequencyRatio = frequency / binFrequency;
+			float numerator = (strideFactor < 0 ? negFrequencyRatio : posFrequencyRatio) - 1.0f;
+			size_t nearestPartialIndex = round(numerator / safeStride);
+			// determine partial bin
+			float nearestPartialFrequency = GetFrequency(frequency, safeStride, nearestPartialIndex);
+			size_t nearestPartialBin = nearestPartialFrequency * FREQUENCY_TO_BIN;
+			// calculate expected level based on whether bin number matches
+			float binLevel = (nearestPartialBin == bin) * baseLevel * fastpower(levelFactor, nearestPartialIndex);
+			// transfer harmonic bin levels to processed spectrum
+			leftProcessedReal[bin] = binLevel * leftSpectrumReal[bin];
+			leftProcessedImag[bin] = binLevel * leftSpectrumImag[bin];
+			rightProcessedReal[bin] = binLevel * rightSpectrumReal[bin];
+			rightProcessedImag[bin] = binLevel * rightSpectrumImag[bin];
 		}
 	}
-idft:
 	// prevent issues with low frequencies / DC
 	leftProcessedReal[0] = 0;
 	leftProcessedImag[0] = 0;
@@ -409,7 +389,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 
 #if LOG_ENABLED
 	uint32_t setupEnd = System::GetTick();
-	setupTotal += (setupEnd - setupStart) / USEC_FREQ;
+	setupTime += (setupEnd - setupStart) / USEC_FREQ;
 	uint32_t processStart = System::GetTick();
 #endif
 
@@ -417,51 +397,48 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 
 #if LOG_ENABLED
 	uint32_t processEnd = System::GetTick();
-	processTotal += (processEnd - processStart) / USEC_FREQ;
+	processTime += (processEnd - processStart) / USEC_FREQ;
 	uint32_t resonanceStart = System::GetTick();
 #endif
 
 	// handle self-oscillation
 	memset(leftResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
 	memset(rightResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
-	float frequency = baseFrequency;
 	float level = 1.0;
-	float levelTotal = 0.0;
+	float resonanceLevelTotal = 0.0;
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		Oscillator& l = leftOscillators[i];
 		Oscillator& r = rightOscillators[i];
+		float frequency = GetFrequency(baseFrequency, strideFactor, i);
 		l.SetFreq(frequency);
 		r.SetFreq(frequency);
-		levelTotal += level;
-		float lowFreqDropoff = fclamp(inverse_lerp(frequency, HARMONIC_MIN, HARMONIC_DROP_LOW), 0.f, 1.f);
-		float highFreqDropoff = fclamp(inverse_lerp(frequency, HARMONIC_MAX, HARMONIC_DROP_HIGH), 0.f, 1.f);
-		float partialLevel = levelFactor * min(lowFreqDropoff, highFreqDropoff);
+		float dropEnd = strideFactor < 0 ? HARMONIC_MIN : HARMONIC_MAX;
+		float dropStart = strideFactor < 0 ? HARMONIC_DROP_LOW : HARMONIC_DROP_HIGH;
+		float dropoff = fclamp(inverse_lerp(frequency, dropEnd, dropStart), 0.f, 1.f);
+		float partialLevel = level * dropoff;
 		for (size_t j = 0; j < size; j++) {
 			leftResonance[j] += partialLevel * l.Process();
 			rightResonance[j] += partialLevel * r.Process();
 		}
-		frequency = GetFrequency(baseFrequency, strideFactor, i);
+		resonanceLevelTotal += level;
 		level *= levelFactor;
 	}
-	float resonanceScale = selfOscillation / levelTotal;
-	for (size_t i = 0; i < size; i++) {
-		leftResonance[i] *= resonanceScale;
-		rightResonance[i] *= resonanceScale;
-	}
+	float resonanceScale = selfOscillation / resonanceLevelTotal; // adjustment for maximum resonance amplitude
 
 #if LOG_ENABLED
 	uint32_t resonanceEnd = System::GetTick();
-	resonanceTotal += (resonanceEnd - resonanceStart) / USEC_FREQ;
+	resonanceTime += (resonanceEnd - resonanceStart) / USEC_FREQ;
 	uint32_t outputStart = System::GetTick();
 #endif
 
 	for (size_t i = 0; i < size; i++) {
 		size_t index = DFT_SIZE/2 - size/2 + i; // read from center of processed signal
 		// get outputs
-		float leftRaw = leftSignalBuffer[index] * BIN_AMPLITUDE_RECIP / window[index]; // adjust for DFT scale and window distortion
-		float rightRaw = rightSignalBuffer[index] * BIN_AMPLITUDE_RECIP / window[index]; // adjust for DFT scale and window distortion
-		float leftRes = leftResonance[i];
-		float rightRes = rightResonance[i];
+		float signalScale = BIN_AMPLITUDE_RECIP / window[index]; // adjust for DFT scale and window distortion
+		float leftRaw = leftSignalBuffer[index] * signalScale;
+		float rightRaw = rightSignalBuffer[index] * signalScale;
+		float leftRes = leftResonance[i] * resonanceScale;
+		float rightRes = rightResonance[i] * resonanceScale;
 		dft_t leftValue = limit(leftRaw + leftRes);
 		dft_t rightValue = limit(rightRaw + rightRes);
 		// update running totals
@@ -482,25 +459,25 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 #if LOG_ENABLED
 	uint32_t outputEnd = System::GetTick();
 	uint32_t callbackEnd = System::GetTick();
-	outputTotal += (outputEnd - outputStart) / USEC_FREQ;
-	callbackTotal += (callbackEnd - callbackStart) / USEC_FREQ;
+	outputTime += (outputEnd - outputStart) / USEC_FREQ;
+	callbackTime += (callbackEnd - callbackStart) / USEC_FREQ;
 	logIteration++;
 	if (logIteration % LOG_ITERATIONS == 0) {
 		// log totals
-		int setupAvg = setupTotal / LOG_ITERATIONS;
-		int processAvg = processTotal / LOG_ITERATIONS;
-		int resAvg = resonanceTotal / LOG_ITERATIONS;
-		int outputAvg = outputTotal / LOG_ITERATIONS;
-		int callbackAvg = callbackTotal / LOG_ITERATIONS;
-		snprintf(logFileBuffer, 256, "Setup: %i us, Proc: %i us, Rez: %i us, Out: %i us, Total: %i us\n", setupAvg, processAvg, resAvg, outputAvg, callbackAvg);
+		int setupAvg = setupTime / LOG_ITERATIONS;
+		int processAvg = processTime / LOG_ITERATIONS;
+		int resonanceAvg = resonanceTime / LOG_ITERATIONS;
+		int outputAvg = outputTime / LOG_ITERATIONS;
+		int callbackAvg = callbackTime / LOG_ITERATIONS;
+		snprintf(logFileBuffer, 256, "Setup: %i us, Proc: %i us, Rez: %i us, Out: %i us, Total: %i us\n", setupAvg, processAvg, resonanceAvg, outputAvg, callbackAvg);
 		isLogWritePending = true;
 		// reset
 		logIteration = 0;
-		setupTotal = 0;
-		processTotal = 0;
-		resonanceTotal = 0;
-		outputTotal = 0;
-		callbackTotal = 0;
+		setupTime = 0;
+		processTime = 0;
+		resonanceTime = 0;
+		outputTime = 0;
+		callbackTime = 0;
 	}
 #endif
 }
@@ -600,15 +577,14 @@ int main(void) {
 	// objects required for signal processing
 	dft.Init();
 	memset(window, 0, sizeof(dft_t)*DFT_SIZE);
-	const size_t windowPadding = AUDIO_BLOCK_SIZE;
-	const size_t internalWidth = DFT_SIZE - 2*windowPadding;
-	for (size_t i = windowPadding; i < internalWidth; i++) {
-		window[i] = hann(i / (double)internalWidth);
+	for (size_t i = 0; i < DFT_SIZE; i++) {
+		window[i] = hann(i / (double)(DFT_SIZE-1));
 	}
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		_initOsc(leftOscillators[i], false); // sines
 		_initOsc(rightOscillators[i], true); // cosines
 	}
+	memset(signalBuffer, 0, sizeof(dft_t)*2*DFT_SIZE); // mostly just for easy skipping of steps
 
 	reverseButton = &hw.GetButton(SW_REVERSE);
 	freezeButton = &hw.GetButton(SW_FREEZE);
