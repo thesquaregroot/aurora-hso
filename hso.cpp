@@ -33,18 +33,9 @@ using namespace daisysp;
 #define DFT_SIZE 4096
 #define OSCILLATOR_COUNT 8
 
-#define DFT_SIZE_RECIP (1.0 / DFT_SIZE)
-#define BIN_COUNT (DFT_SIZE / 2)
-#define BIN_AMPLITUDE_RECIP (2.0 / DFT_SIZE)
-#define NYQUIST_LIMIT (SAMPLE_RATE / 2.0)
-#define FREQUENCY_TO_BIN (BIN_COUNT / NYQUIST_LIMIT)
-#define BIN_WIDTH (NYQUIST_LIMIT / BIN_COUNT)
-
-#define FREQUENCY_EPSILON (BIN_WIDTH / 2.0)
-#define STRIDE_EPSILON (BIN_WIDTH / NYQUIST_LIMIT)
-
 #define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
+
 #define HARMONIC_MIN 1
 #define HARMONIC_DROP_LOW 5
 #define HARMONIC_DROP_HIGH 20000
@@ -53,6 +44,15 @@ using namespace daisysp;
 #define CONFIG_FILE_NAME "HSO.txt"
 #define CONFIG_REVERSE "INVERT_REVERSE"
 #define CONFIG_FREEZE "INVERT_FREEZE"
+
+const float DFT_SIZE_RECIP = (1.0 / DFT_SIZE);
+const int BIN_COUNT = (DFT_SIZE / 2);
+const float NYQUIST_LIMIT = (SAMPLE_RATE / 2.0);
+const float FREQUENCY_TO_BIN = (BIN_COUNT / NYQUIST_LIMIT);
+const float BIN_WIDTH = (NYQUIST_LIMIT / BIN_COUNT);
+
+const float FREQUENCY_EPSILON = (BIN_WIDTH / 2.0);
+const float STRIDE_EPSILON = (BIN_WIDTH / NYQUIST_LIMIT);
 
 Hardware hw;
 bool isUsbConnected = false;
@@ -277,10 +277,18 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	dft.Direct(rightSignalBuffer, rightSpectrum);
 
 	bool shouldKeepFrequency = fabsf(baseFrequency - lastFrequency) < FREQUENCY_EPSILON;
-	float frequency = shouldKeepFrequency ? lastFrequency : baseFrequency;
-	size_t cutoffBin = shouldKeepFrequency ? lastBin : round(baseFrequency * FREQUENCY_TO_BIN);
-	lastFrequency = frequency;
-	lastBin = cutoffBin;
+	float frequency;
+	size_t cutoffBin;
+	if (shouldKeepFrequency) {
+		frequency = lastFrequency;
+		cutoffBin = lastBin;
+	}
+	else {
+		frequency = baseFrequency;
+		cutoffBin = baseFrequency * FREQUENCY_TO_BIN + 0.5; // simple round, using truncation
+		lastFrequency = frequency;
+		lastBin = cutoffBin;
+	}
 
 	float baseLevel = 1.0 + resonance;
 	if (isFreezeActive) {
@@ -325,9 +333,9 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 			size_t nearestPartialIndex = round(numerator / safeStride);
 			// determine partial bin
 			float nearestPartialFrequency = getFrequency(frequency, signedSafeStride, nearestPartialIndex);
-			size_t nearestPartialBin = round(nearestPartialFrequency * FREQUENCY_TO_BIN);
+			bool containsPartial = fabsf(nearestPartialFrequency - binFrequency) < BIN_WIDTH;
 			// calculate expected level based on whether bin number matches
-			float binLevel = (nearestPartialBin == bin) * baseLevel * levelPower(levelFactor, nearestPartialIndex);
+			float binLevel = containsPartial * baseLevel * levelPower(levelFactor, nearestPartialIndex);
 			// transfer harmonic bin levels to processed spectrum
 			leftProcessedReal[bin] = binLevel * leftSpectrumReal[bin];
 			leftProcessedImag[bin] = binLevel * leftSpectrumImag[bin];
@@ -346,9 +354,9 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 }
 
 dft_t limit(dft_t value) {
-	if (!isfinite(value)) {
+	/*if (!isfinite(value)) {
 		return 0.0;
-	}
+	}*/
 	return SoftClip(value);
 }
 
@@ -463,7 +471,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	for (size_t i = 0; i < size; i++) {
 		size_t index = DFT_SIZE/2 - size/2 + i; // read from center of processed signal
 		// get outputs
-		float signalScale = BIN_AMPLITUDE_RECIP / window[index]; // adjust for DFT scale and window distortion
+		float signalScale = DFT_SIZE_RECIP / window[index]; // adjust for DFT scale and window distortion
 		float leftRaw = leftSignalBuffer[index] * signalScale;
 		float rightRaw = rightSignalBuffer[index] * signalScale;
 		float leftRes = leftResonance[i] * resonanceScale;
