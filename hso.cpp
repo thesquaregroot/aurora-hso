@@ -42,11 +42,12 @@ using namespace daisysp;
 
 #define FREQUENCY_EPSILON (BIN_WIDTH / 2)
 #define STRIDE_EPSILON (BIN_WIDTH / NYQUIST_LIMIT)
+#define LEVEL_EPSILON 0.001 /* 60 db */
 
-#define FREQUENCY_MIN 1
+#define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
-#define HARMONIC_MIN 20
-#define HARMONIC_DROP_LOW 40
+#define HARMONIC_MIN 1
+#define HARMONIC_DROP_LOW 5
 #define HARMONIC_DROP_HIGH 20000
 #define HARMONIC_MAX 24000
 
@@ -222,13 +223,13 @@ dft_t* rightProcessedImag = rightProcessed + BIN_COUNT;
 float lastFrequency = 0;
 size_t lastBin = 0;
 
-inline float AbsNonZero(const float x, const float epsilon) {
+inline float absNonZero(const float x, const float epsilon) {
 	// fairly linear curve on both sides, but rounded near zero (so that value never becomes zero)
 	// note that this is continuous and always positive
 	return sqrt(x*x + epsilon);
 }
 
-inline float GetFrequency(const float baseFrequency, const float strideFactor, const size_t index) {
+inline float getFrequency(const float baseFrequency, const float strideFactor, const size_t index) {
 	// When stride is positive, we target multiples of the frequency.
 	// When stride is negative, we target divisions of the frequency.
 	//
@@ -285,7 +286,7 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		rightProcessedImag[cutoffBin] *= baseLevel;
 	}
 	else {
-		float safeStride = AbsNonZero(strideFactor, STRIDE_EPSILON);
+		float safeStride = absNonZero(strideFactor, STRIDE_EPSILON);
 		// sparse placement, but level decay allows us to bail out before too long
 		for (size_t bin = 0; bin < BIN_COUNT; bin++) {
 			// calculate nearest partial frequency and check if it's in this bin
@@ -297,7 +298,7 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 			float numerator = (strideFactor < 0 ? negFrequencyRatio : posFrequencyRatio) - 1.0f;
 			size_t nearestPartialIndex = round(numerator / safeStride);
 			// determine partial bin
-			float nearestPartialFrequency = GetFrequency(frequency, safeStride, nearestPartialIndex);
+			float nearestPartialFrequency = getFrequency(frequency, safeStride, nearestPartialIndex);
 			size_t nearestPartialBin = nearestPartialFrequency * FREQUENCY_TO_BIN;
 			// calculate expected level based on whether bin number matches
 			float binLevel = (nearestPartialBin == bin) * baseLevel * fastpower(levelFactor, nearestPartialIndex);
@@ -404,16 +405,18 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	// handle self-oscillation
 	memset(leftResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
 	memset(rightResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
+	// determine where we might drop partials
+	float dropEnd = strideFactor < 0 ? HARMONIC_MIN : HARMONIC_MAX;
+	float dropStart = strideFactor < 0 ? HARMONIC_DROP_LOW : HARMONIC_DROP_HIGH;
+	// compute sum of oscillations
 	float level = 1.0;
 	float resonanceLevelTotal = 0.0;
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		Oscillator& l = leftOscillators[i];
 		Oscillator& r = rightOscillators[i];
-		float frequency = GetFrequency(baseFrequency, strideFactor, i);
+		float frequency = getFrequency(baseFrequency, strideFactor, i);
 		l.SetFreq(frequency);
 		r.SetFreq(frequency);
-		float dropEnd = strideFactor < 0 ? HARMONIC_MIN : HARMONIC_MAX;
-		float dropStart = strideFactor < 0 ? HARMONIC_DROP_LOW : HARMONIC_DROP_HIGH;
 		float dropoff = fclamp(inverse_lerp(frequency, dropEnd, dropStart), 0.f, 1.f);
 		float partialLevel = level * dropoff;
 		for (size_t j = 0; j < size; j++) {
