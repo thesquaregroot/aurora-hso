@@ -278,7 +278,7 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 
 	bool shouldKeepFrequency = fabsf(baseFrequency - lastFrequency) < FREQUENCY_EPSILON;
 	float frequency = shouldKeepFrequency ? lastFrequency : baseFrequency;
-	size_t cutoffBin = shouldKeepFrequency ? lastBin : (baseFrequency * FREQUENCY_TO_BIN);
+	size_t cutoffBin = shouldKeepFrequency ? lastBin : round(baseFrequency * FREQUENCY_TO_BIN);
 	lastFrequency = frequency;
 	lastBin = cutoffBin;
 
@@ -310,20 +310,22 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		rightProcessedImag[cutoffBin] *= baseLevel;
 	}
 	else {
+		bool isStrideNegative = strideFactor < 0;
 		float safeStride = absNonZero(strideFactor, STRIDE_EPSILON);
+		float signedSafeStride = isStrideNegative ? -safeStride : safeStride;
 		// sparse placement, but level decay allows us to bail out before too long
 		for (size_t bin = 0; bin < BIN_COUNT; bin++) {
 			// calculate nearest partial frequency and check if it's in this bin
 			// for positive stride,  n = (f_n / f_0 - 1) / s
 			// for negative stride,  n = (f_0 / f_n - 1) / -s
-			float binFrequency = (bin + 0.5f) * BIN_WIDTH;
+			float binFrequency = bin * BIN_WIDTH;
 			float posFrequencyRatio = binFrequency / frequency;
 			float negFrequencyRatio = frequency / binFrequency;
-			float numerator = (strideFactor < 0 ? negFrequencyRatio : posFrequencyRatio) - 1.0f;
+			float numerator = (isStrideNegative ? negFrequencyRatio : posFrequencyRatio) - 1.0f;
 			size_t nearestPartialIndex = round(numerator / safeStride);
 			// determine partial bin
-			float nearestPartialFrequency = getFrequency(frequency, safeStride, nearestPartialIndex);
-			size_t nearestPartialBin = nearestPartialFrequency * FREQUENCY_TO_BIN;
+			float nearestPartialFrequency = getFrequency(frequency, signedSafeStride, nearestPartialIndex);
+			size_t nearestPartialBin = round(nearestPartialFrequency * FREQUENCY_TO_BIN);
 			// calculate expected level based on whether bin number matches
 			float binLevel = (nearestPartialBin == bin) * baseLevel * levelPower(levelFactor, nearestPartialIndex);
 			// transfer harmonic bin levels to processed spectrum
@@ -611,7 +613,7 @@ int main(void) {
 		_initOsc(leftOscillators[i], false); // sines
 		_initOsc(rightOscillators[i], true); // cosines
 	}
-	memset(signalBuffer, 0, sizeof(dft_t)*2*DFT_SIZE); // mostly just for easy skipping of steps
+	memset(signalBuffer, 0, sizeof(dft_t)*2*DFT_SIZE); // mostly just for easy skipping of process when testing
 
 	reverseButton = &hw.GetButton(SW_REVERSE);
 	freezeButton = &hw.GetButton(SW_FREEZE);
