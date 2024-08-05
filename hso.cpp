@@ -40,9 +40,8 @@ using namespace daisysp;
 #define FREQUENCY_TO_BIN (BIN_COUNT / NYQUIST_LIMIT)
 #define BIN_WIDTH (NYQUIST_LIMIT / BIN_COUNT)
 
-#define FREQUENCY_EPSILON (BIN_WIDTH / 2)
+#define FREQUENCY_EPSILON (BIN_WIDTH / 2.0)
 #define STRIDE_EPSILON (BIN_WIDTH / NYQUIST_LIMIT)
-#define LEVEL_EPSILON 0.001 /* 60 db */
 
 #define FREQUENCY_MIN 20
 #define FREQUENCY_MAX 16000
@@ -223,10 +222,35 @@ dft_t* rightProcessedImag = rightProcessed + BIN_COUNT;
 float lastFrequency = 0;
 size_t lastBin = 0;
 
+/**
+ * Absolute value via square and square rooting, but with a small constant added which
+ * allows us to avoid zero.  Provides a continuous way to go to through-zero, as long
+ * as we account for the original sign elsewhere (which we generally need to do anyway).
+ */
 inline float absNonZero(const float x, const float epsilon) {
 	// fairly linear curve on both sides, but rounded near zero (so that value never becomes zero)
 	// note that this is continuous and always positive
 	return sqrt(x*x + epsilon);
+}
+
+/**
+ * With low stride values, the partial indexes can be very high.  So when we attempt to
+ * compute the level for that index, we are often raising level factor to high powers.
+ *
+ * powf was too slow and fastpower resulted in glitchiness when level factor was near zero.
+ * However, we can take advantage of the facts that the power and base are always positive.
+ */
+float levelPower(float base, uint32_t power) {
+	if (base >= 1) return 1;
+	float result = 1;
+	while (power > 0) {
+		if (power % 2 == 1) {
+			result *= base;
+		}
+		power /= 2;
+		base *= base; // inconsequential if power is now 0, but otherwise it's even, so immediately reduce
+	}
+	return result;
 }
 
 inline float getFrequency(const float baseFrequency, const float strideFactor, const size_t index) {
@@ -301,7 +325,7 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 			float nearestPartialFrequency = getFrequency(frequency, safeStride, nearestPartialIndex);
 			size_t nearestPartialBin = nearestPartialFrequency * FREQUENCY_TO_BIN;
 			// calculate expected level based on whether bin number matches
-			float binLevel = (nearestPartialBin == bin) * baseLevel * fastpower(levelFactor, nearestPartialIndex);
+			float binLevel = (nearestPartialBin == bin) * baseLevel * levelPower(levelFactor, nearestPartialIndex);
 			// transfer harmonic bin levels to processed spectrum
 			leftProcessedReal[bin] = binLevel * leftSpectrumReal[bin];
 			leftProcessedImag[bin] = binLevel * leftSpectrumImag[bin];
