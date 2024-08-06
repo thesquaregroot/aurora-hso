@@ -17,7 +17,6 @@
  *				brick wall filter.  This is the same as when stride is 0 and level is 1.
  */
 #include <string>
-#include <cmath> // for isfinite
 #include "aurora.h"
 #include "daisysp.h"
 #include "fft/shy_fft.h"
@@ -45,14 +44,19 @@ using namespace daisysp;
 #define CONFIG_REVERSE "INVERT_REVERSE"
 #define CONFIG_FREEZE "INVERT_FREEZE"
 
-const float DFT_SIZE_RECIP = (1.0 / DFT_SIZE);
-const int BIN_COUNT = (DFT_SIZE / 2);
-const float NYQUIST_LIMIT = (SAMPLE_RATE / 2.0);
-const float FREQUENCY_TO_BIN = (BIN_COUNT / NYQUIST_LIMIT);
-const float BIN_WIDTH = (NYQUIST_LIMIT / BIN_COUNT);
+const float DFT_SIZE_RECIP = 1.0 / DFT_SIZE;
+const int BIN_COUNT = DFT_SIZE / 2;
+const float NYQUIST_FREQUENCY = SAMPLE_RATE / 2.0;
+const float FREQUENCY_TO_BIN = BIN_COUNT / NYQUIST_FREQUENCY;
+const float BIN_WIDTH = NYQUIST_FREQUENCY / BIN_COUNT;
+const float HALF_BIN_WIDTH = BIN_WIDTH / 2.0;
 
-const float FREQUENCY_EPSILON = (BIN_WIDTH / 2.0);
-const float STRIDE_EPSILON = (BIN_WIDTH / NYQUIST_LIMIT);
+// amount frequency has to change before processing is affected
+const float FREQUENCY_EPSILON = HALF_BIN_WIDTH;
+// minimum stride value
+// set low enough to target all bins for all frequencies
+// but high enough to keep partial numbers reasonably sane
+const float STRIDE_EPSILON = BIN_WIDTH / FREQUENCY_MAX;
 
 Hardware hw;
 bool isUsbConnected = false;
@@ -171,17 +175,17 @@ inline float inverse_lerp(float c, float a, float b) {
 
 dft_t hann(double phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
 
-ITCMRAM Oscillator leftOscillators[OSCILLATOR_COUNT];
-ITCMRAM Oscillator rightOscillators[OSCILLATOR_COUNT];
-ITCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
-ITCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
+DTCMRAM Oscillator leftOscillators[OSCILLATOR_COUNT];
+DTCMRAM Oscillator rightOscillators[OSCILLATOR_COUNT];
+DTCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
+DTCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
 
 const Switch* reverseButton;
-bool isReverseActive = false;
-bool isReverseInverted = false; // flips gate interpretation, changed by user input
+DTCMRAM bool isReverseActive = false;
+DTCMRAM bool isReverseInverted = false; // flips gate interpretation, changed by user input
 const Switch* freezeButton;
-bool isFreezeActive = false;
-bool isFreezeInverted = false; // flips gate interpretation, changed by user input
+DTCMRAM bool isFreezeActive = false;
+DTCMRAM bool isFreezeInverted = false; // flips gate interpretation, changed by user input
 
 // variables for tracking averages (for LEDs)
 ITCMRAM Buffer leftSignal; // input signal for left channel (also used for mix)
@@ -219,8 +223,8 @@ dft_t* rightProcessed = processedSpectrumBuffer + DFT_SIZE;
 dft_t* rightProcessedReal = rightProcessed;
 dft_t* rightProcessedImag = rightProcessed + BIN_COUNT;
 
-float lastFrequency = 0;
-size_t lastBin = 0;
+DTCMRAM float lastFrequency = 0;
+DTCMRAM size_t lastBin = 0;
 
 /**
  * Absolute value via square and square rooting, but with a small constant added which
@@ -241,7 +245,7 @@ inline float absNonZero(const float x, const float epsilon) {
  * However, we can take advantage of the facts that the power and base are always positive.
  */
 float levelPower(float base, uint32_t power) {
-	if (base >= 1) return 1;
+	if (base >= 1) return 1; // avoid wasteful/incorrect calculations
 	float result = 1;
 	while (power > 0) {
 		if (power % 2 == 1) {
@@ -253,29 +257,32 @@ float levelPower(float base, uint32_t power) {
 	return result;
 }
 
-inline float getFrequency(const float baseFrequency, const float strideFactor, const size_t index) {
+inline float getFrequency(const double baseFrequency, const double strideFactor, const size_t index) {
 	// When stride is positive, we target multiples of the frequency.
 	// When stride is negative, we target divisions of the frequency.
 	//
-	// When stride = 1, this corresponds to harmonics (all integer multiples) or overtones
-	// When stride = -1, this corresponds to subharmonics (integer submultiples) or undertones
+	// When stride = 1, this corresponds to harmonics (integer multiples: 1, 2, 3, etc.) or overtones
+	// When stride = -1, this corresponds to subharmonics (integer submultiples: 1/1, 1/2, 1/3, etc.) or undertones
 	//
 	// General formulas:
 	//   positive stride: f_n = f_0 * (1 + n*s)
 	//   negative stride: f_n = f_0 / (1 - n*s)
-	return (strideFactor >= 0) ?
-			baseFrequency * (1 + index * strideFactor) :
-			baseFrequency / (1 - index * strideFactor);
+	return (strideFactor < 0) ?
+			baseFrequency / (1.0 - index * strideFactor) :
+			baseFrequency * (1.0 + index * strideFactor);
 }
 
 void processSignals(float baseFrequency, float strideFactor, float levelFactor, float resonance) {
+	// create windowed signal in buffer
 	for (int i = 0; i < DFT_SIZE; i++) {
 		leftSignalBuffer[i] = leftSignal[i] * window[i];
 		rightSignalBuffer[i] = rightSignal[i] * window[i];
 	}
+	// perform forward transform
 	dft.Direct(leftSignalBuffer, leftSpectrum);
 	dft.Direct(rightSignalBuffer, rightSpectrum);
 
+	// attempt to stabilize results by only changing target frquency when it has changed
 	bool shouldKeepFrequency = fabsf(baseFrequency - lastFrequency) < FREQUENCY_EPSILON;
 	float frequency;
 	size_t cutoffBin;
@@ -318,11 +325,18 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		rightProcessedImag[cutoffBin] *= baseLevel;
 	}
 	else {
-		bool isStrideNegative = strideFactor < 0;
-		float safeStride = absNonZero(strideFactor, STRIDE_EPSILON);
+		// due to noisy controls, and the fact that crossing zero for processing can have
+		// a pretty drastic/sudden effect, this adds some buffer depending on the mode
+		// to minimize the likely that processing switching directions unexpectedly
+		bool isStrideNegative = isReverseActive ? (strideFactor < STRIDE_EPSILON) : (strideFactor < -STRIDE_EPSILON);
+		// since some of the calculations below require dividing by the stride
+		// (and one requires a positive version of it), we use a trick to
+		// round out the absolute value near zero.  This also provides an opportunity
+		// to keep stride from getting too small and blowing things up anyway
+		float safeStride = absNonZero(strideFactor, BIN_WIDTH / baseFrequency);
 		float signedSafeStride = isStrideNegative ? -safeStride : safeStride;
 		// sparse placement, but level decay allows us to bail out before too long
-		for (size_t bin = 0; bin < BIN_COUNT; bin++) {
+		for (size_t bin = 1; bin < BIN_COUNT; bin++) {
 			// calculate nearest partial frequency and check if it's in this bin
 			// for positive stride,  n = (f_n / f_0 - 1) / s
 			// for negative stride,  n = (f_0 / f_n - 1) / -s
@@ -331,11 +345,11 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 			float negFrequencyRatio = frequency / binFrequency;
 			float numerator = (isStrideNegative ? negFrequencyRatio : posFrequencyRatio) - 1.0f;
 			size_t nearestPartialIndex = round(numerator / safeStride);
-			// determine partial bin
 			float nearestPartialFrequency = getFrequency(frequency, signedSafeStride, nearestPartialIndex);
-			bool containsPartial = fabsf(nearestPartialFrequency - binFrequency) < BIN_WIDTH;
-			// calculate expected level based on whether bin number matches
-			float binLevel = containsPartial * baseLevel * levelPower(levelFactor, nearestPartialIndex);
+			// determine the bin level using the partial's nearness to the bin frequency
+			float distanceToBin = fabsf(nearestPartialFrequency - binFrequency) / HALF_BIN_WIDTH; // normalized to bin width
+			float proximityLevel = fclamp(1.0f - distanceToBin, 0, 1); // 1 when at bin, down to 0 when at next bin in either direction
+			float binLevel = proximityLevel * baseLevel * levelPower(levelFactor, nearestPartialIndex);
 			// transfer harmonic bin levels to processed spectrum
 			leftProcessedReal[bin] = binLevel * leftSpectrumReal[bin];
 			leftProcessedImag[bin] = binLevel * leftSpectrumImag[bin];
@@ -343,7 +357,7 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 			rightProcessedImag[bin] = binLevel * rightSpectrumImag[bin];
 		}
 	}
-	// prevent issues with low frequencies / DC
+	// prevent issues with low frequencies / DC offset
 	leftProcessedReal[0] = 0;
 	leftProcessedImag[0] = 0;
 	rightProcessedReal[0] = 0;
@@ -353,10 +367,7 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	dft.Inverse(rightProcessed, rightSignalBuffer);
 }
 
-dft_t limit(dft_t value) {
-	/*if (!isfinite(value)) {
-		return 0.0;
-	}*/
+inline dft_t limit(dft_t value) {
 	return SoftClip(value);
 }
 
