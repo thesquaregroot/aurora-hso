@@ -55,9 +55,10 @@ const float BIN_OVERLAP = BIN_WIDTH;
 // amount frequency has to change before processing is affected
 const float FREQUENCY_EPSILON = HALF_BIN_WIDTH;
 // amount stride needs to dip below zero before being treated as negative
-const float STRIDE_EPSILON = BIN_WIDTH / FREQUENCY_MAX;
+const float STRIDE_EPSILON = 0.01;
 
 Hardware hw;
+float* cvOffsets;
 bool isUsbConnected = false;
 bool isUsbConfigured = false;
 bool wasConfigLoadAttempted = false;
@@ -260,7 +261,6 @@ inline float getStrideEpsilon(const float frequency, bool isNegative) {
  * However, we can take advantage of the facts that the power and base are always positive.
  */
 float levelPower(float base, uint32_t power) {
-	if (base >= 1) return 1; // avoid wasteful/incorrect calculations
 	float result = 1;
 	while (power > 0) {
 		if (power % 2 == 1) {
@@ -311,7 +311,7 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	}
 	else {
 		frequency = baseFrequency;
-		cutoffBin = baseFrequency * FREQUENCY_TO_BIN + 0.5; // simple round, using truncation
+		cutoffBin = round(baseFrequency * FREQUENCY_TO_BIN); // simple round, using truncation
 		lastFrequency = frequency;
 		lastBin = cutoffBin;
 	}
@@ -353,31 +353,27 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		// (and one requires a positive version of it), we use a trick to
 		// round out the absolute value near zero.  This also provides an opportunity
 		// to keep stride from getting too small and blowing things up anyway
-		float safeStride = absNonZero(strideFactor, getStrideEpsilon(baseFrequency, isStrideNegative));
+		float strideEpsilon = getStrideEpsilon(baseFrequency, isStrideNegative);
+		float safeStride = absNonZero(strideFactor, strideEpsilon);
 		float signedSafeStride = isStrideNegative ? -safeStride : safeStride;
 
 		// iterating through all bins (except 0 since we're just going to clear it)
 		// as this is more efficient/consistent than iterating through partials,
 		// particularly when stride is very low and level is high
 		for (size_t bin = 1; bin < BIN_COUNT; bin++) {
+			float binFrequency = bin * BIN_WIDTH;
 			// calculate nearest partial frequency and check if it's in this bin
 			// for positive stride,  n = (f_n / f_0 - 1) / s
 			// for negative stride,  n = (f_0 / f_n - 1) / -s
-			float binFrequency = bin * BIN_WIDTH;
 			float posFrequencyRatio = binFrequency / frequency;
 			float negFrequencyRatio = frequency / binFrequency;
 			float numerator = (isStrideNegative ? negFrequencyRatio : posFrequencyRatio) - 1.0f;
-			long nearestPartialIndex = round(numerator / safeStride);
-			float binLevel = 0.0f;
-			if (nearestPartialIndex >= 0) {
-				float nearestPartialFrequency = getFrequency(frequency, signedSafeStride, nearestPartialIndex);
-				// determine the bin level using the partial's nearness to the bin frequency
-				float distanceToBin = fabsf(nearestPartialFrequency - binFrequency) / BIN_OVERLAP;
-				float proximityLevel = 1.0f - distanceToBin; // 1 when at bin, down to zero at overlap distance
-				if (proximityLevel > 0.0f) {
-					binLevel = proximityLevel * baseLevel * levelPower(levelFactor, nearestPartialIndex);
-				}
-			}
+			uint32_t nearestPartialIndex = round(numerator / safeStride);
+			float nearestPartialFrequency = getFrequency(frequency, signedSafeStride, nearestPartialIndex);
+			// determine the bin level using the partial's nearness to the bin frequency
+			float distanceToBin = fabsf(nearestPartialFrequency - binFrequency) / BIN_OVERLAP;
+			float proximityLevel = fclamp(1.0f - distanceToBin, 0, 1); // 1 when at bin, down to zero at overlap distance
+			float binLevel = (nearestPartialIndex >= 0) * baseLevel * proximityLevel * levelPower(levelFactor, nearestPartialIndex);
 			// transfer harmonic bin levels to processed spectrum
 			leftProcessedReal[bin] = binLevel * leftSpectrumReal[bin];
 			leftProcessedImag[bin] = binLevel * leftSpectrumImag[bin];
@@ -436,8 +432,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	float selfOscillation = fmap(4.0*(resonance - 0.75), 0.0, 1.0);
 	selfOscillation = selfOscillation * selfOscillation; // quadratic curve
 
-	// Reflect Knob/CV - stride
-	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT);
+	// Reflect Knob/CV - stride (removing cv offset since it seems to interfer thought through-zero processing)
+	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT) - cvOffsets[CV_REFLECT];
 	float strideFactor = (isReverseActive ? -5.0 : 5.0) * rawStride;
 
 	// Atmosphere Knob/CV - level
@@ -635,6 +631,7 @@ bool writeConfig() {
 
 int main(void) {
 	hw.Init();
+	hw.GetCvOffsetData(cvOffsets); // used to ignore offset for through-zero stride control
 
 	// Prepare for loading config via USB
 	const char* usbPath = fatfs_interface.GetUSBPath();
