@@ -50,13 +50,12 @@ const float NYQUIST_FREQUENCY = SAMPLE_RATE / 2.0;
 const float FREQUENCY_TO_BIN = BIN_COUNT / NYQUIST_FREQUENCY;
 const float BIN_WIDTH = NYQUIST_FREQUENCY / BIN_COUNT;
 const float HALF_BIN_WIDTH = BIN_WIDTH / 2.0;
+const float BIN_OVERLAP = BIN_WIDTH;
 
 // amount frequency has to change before processing is affected
 const float FREQUENCY_EPSILON = HALF_BIN_WIDTH;
-// minimum stride value
-// set low enough to target all bins for all frequencies
-// but high enough to keep partial numbers reasonably sane
-const float STRIDE_EPSILON = BIN_WIDTH / FREQUENCY_MAX;
+// amount stride needs to dip below zero before being treated as negative
+const float STRIDE_EPSILON = 0.001;
 
 Hardware hw;
 bool isUsbConnected = false;
@@ -72,10 +71,11 @@ bool isConfigChanged = false;
 // (i.e. not from the audio callback).
 //
 // see: https://forum.electro-smith.com/t/error-reading-file-from-sd-card/3911
+#define IO_BUFFER_SIZE 256
 FIL file;
 FRESULT fileResult;
-char configFilePath[100];
-char fileLineBuffer[100];
+char configFilePath[IO_BUFFER_SIZE];
+char fileLineBuffer[IO_BUFFER_SIZE];
 
 // Logging
 #define LOG_ENABLED 1
@@ -95,8 +95,8 @@ uint32_t callbackTime = 0;
 
 FIL logFile;
 FRESULT logFileResult;
-char logFilePath[100];
-char logFileBuffer[256];
+char logFilePath[IO_BUFFER_SIZE];
+char logFileBuffer[IO_BUFFER_SIZE];
 bool isLogWritePending = false;
 bool isFirstWrite = true;
 
@@ -175,17 +175,17 @@ inline float inverse_lerp(float c, float a, float b) {
 
 dft_t hann(double phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
 
-DTCMRAM Oscillator leftOscillators[OSCILLATOR_COUNT];
-DTCMRAM Oscillator rightOscillators[OSCILLATOR_COUNT];
+ITCMRAM Oscillator leftOscillators[OSCILLATOR_COUNT];
+ITCMRAM Oscillator rightOscillators[OSCILLATOR_COUNT];
 DTCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
 DTCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
 
 const Switch* reverseButton;
-DTCMRAM bool isReverseActive = false;
-DTCMRAM bool isReverseInverted = false; // flips gate interpretation, changed by user input
+bool isReverseActive = false;
+bool isReverseInverted = false; // flips gate interpretation, changed by user input
 const Switch* freezeButton;
-DTCMRAM bool isFreezeActive = false;
-DTCMRAM bool isFreezeInverted = false; // flips gate interpretation, changed by user input
+bool isFreezeActive = false;
+bool isFreezeInverted = false; // flips gate interpretation, changed by user input
 
 // variables for tracking averages (for LEDs)
 ITCMRAM Buffer leftSignal; // input signal for left channel (also used for mix)
@@ -223,8 +223,8 @@ dft_t* rightProcessed = processedSpectrumBuffer + DFT_SIZE;
 dft_t* rightProcessedReal = rightProcessed;
 dft_t* rightProcessedImag = rightProcessed + BIN_COUNT;
 
-DTCMRAM float lastFrequency = 0;
-DTCMRAM size_t lastBin = 0;
+float lastFrequency = 0;
+size_t lastBin = 0;
 
 /**
  * Absolute value via square and square rooting, but with a small constant added which
@@ -234,7 +234,22 @@ DTCMRAM size_t lastBin = 0;
 inline float absNonZero(const float x, const float epsilon) {
 	// fairly linear curve on both sides, but rounded near zero (so that value never becomes zero)
 	// note that this is continuous and always positive
-	return sqrt(x*x + epsilon);
+	return sqrt(x*x + epsilon*epsilon);
+}
+
+/**
+ * Calculates a stride value that ensures a partial is in every bin.
+ * In particular, calculates s so that the first partial is exactly
+ * one bin width away from the base frequency.
+ *
+ * Given a base frequency, f_0, and FFT bin width, b:
+ *	positive stride: f_0 + b = f_0 * (1 + s)  =>  s = b / f_0
+ *	negative stride: f_0 - b = f_0 / (1 + s)  =>  s = b / (f_0 - b)
+ */
+inline float getStrideEpsilon(const float frequency, bool isNegative) {
+	return isNegative ?
+		BIN_WIDTH / (frequency - BIN_WIDTH) :
+		BIN_WIDTH / frequency;
 }
 
 /**
@@ -257,16 +272,20 @@ float levelPower(float base, uint32_t power) {
 	return result;
 }
 
-inline float getFrequency(const double baseFrequency, const double strideFactor, const size_t index) {
-	// When stride is positive, we target multiples of the frequency.
-	// When stride is negative, we target divisions of the frequency.
-	//
-	// When stride = 1, this corresponds to harmonics (integer multiples: 1, 2, 3, etc.) or overtones
-	// When stride = -1, this corresponds to subharmonics (integer submultiples: 1/1, 1/2, 1/3, etc.) or undertones
-	//
-	// General formulas:
-	//   positive stride: f_n = f_0 * (1 + n*s)
-	//   negative stride: f_n = f_0 / (1 - n*s)
+/**
+ * Calculates the n-th partial of the base frequency, given the stride factor.
+ *
+ * When stride is positive, we target multiples of the frequency.
+ * With stride = 1, this corresponds to harmonics (integer multiples: 1, 2, 3, etc.) or overtones.
+ *
+ * When stride is negative, we target divisions of the frequency.
+ * With stride = -1, this corresponds to subharmonics (integer submultiples: 1/1, 1/2, 1/3, etc.) or undertones.
+ *
+ * General formulas:
+ *   positive stride: f_n = f_0 * (1 + n*s)
+ *   negative stride: f_n = f_0 / (1 - n*s)
+ */
+inline float getFrequency(const float baseFrequency, const float strideFactor, const size_t index) {
 	return (strideFactor < 0) ?
 			baseFrequency / (1.0 - index * strideFactor) :
 			baseFrequency * (1.0 + index * strideFactor);
@@ -296,6 +315,8 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		lastFrequency = frequency;
 		lastBin = cutoffBin;
 	}
+	//float frequency = baseFrequency;
+	//size_t cutoffBin = baseFrequency * FREQUENCY_TO_BIN + 0.5; // simple round, using truncation
 
 	float baseLevel = 1.0 + resonance;
 	if (isFreezeActive) {
@@ -329,13 +350,17 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		// a pretty drastic/sudden effect, this adds some buffer depending on the mode
 		// to minimize the likely that processing switching directions unexpectedly
 		bool isStrideNegative = isReverseActive ? (strideFactor < STRIDE_EPSILON) : (strideFactor < -STRIDE_EPSILON);
+
 		// since some of the calculations below require dividing by the stride
 		// (and one requires a positive version of it), we use a trick to
 		// round out the absolute value near zero.  This also provides an opportunity
 		// to keep stride from getting too small and blowing things up anyway
-		float safeStride = absNonZero(strideFactor, BIN_WIDTH / baseFrequency);
+		float safeStride = absNonZero(strideFactor, getStrideEpsilon(baseFrequency, isStrideNegative));
 		float signedSafeStride = isStrideNegative ? -safeStride : safeStride;
-		// sparse placement, but level decay allows us to bail out before too long
+
+		// iterating through all bins (except 0 since we're just going to clear it)
+		// as this is more efficient/consistent than iterating through partials,
+		// particularly when stride is very low and level is high
 		for (size_t bin = 1; bin < BIN_COUNT; bin++) {
 			// calculate nearest partial frequency and check if it's in this bin
 			// for positive stride,  n = (f_n / f_0 - 1) / s
@@ -344,12 +369,17 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 			float posFrequencyRatio = binFrequency / frequency;
 			float negFrequencyRatio = frequency / binFrequency;
 			float numerator = (isStrideNegative ? negFrequencyRatio : posFrequencyRatio) - 1.0f;
-			size_t nearestPartialIndex = round(numerator / safeStride);
-			float nearestPartialFrequency = getFrequency(frequency, signedSafeStride, nearestPartialIndex);
-			// determine the bin level using the partial's nearness to the bin frequency
-			float distanceToBin = fabsf(nearestPartialFrequency - binFrequency) / HALF_BIN_WIDTH; // normalized to bin width
-			float proximityLevel = fclamp(1.0f - distanceToBin, 0, 1); // 1 when at bin, down to 0 when at next bin in either direction
-			float binLevel = proximityLevel * baseLevel * levelPower(levelFactor, nearestPartialIndex);
+			long nearestPartialIndex = round(numerator / safeStride);
+			float binLevel = 0.0f;
+			if (nearestPartialIndex >= 0) {
+				float nearestPartialFrequency = getFrequency(frequency, signedSafeStride, nearestPartialIndex);
+				// determine the bin level using the partial's nearness to the bin frequency
+				float distanceToBin = fabsf(nearestPartialFrequency - binFrequency) / BIN_OVERLAP;
+				float proximityLevel = 1.0f - distanceToBin; // 1 when at bin, down to zero at overlap distance
+				if (proximityLevel > 0.0f) {
+					binLevel = proximityLevel * baseLevel * levelPower(levelFactor, nearestPartialIndex);
+				}
+			}
 			// transfer harmonic bin levels to processed spectrum
 			leftProcessedReal[bin] = binLevel * leftSpectrumReal[bin];
 			leftProcessedImag[bin] = binLevel * leftSpectrumImag[bin];
@@ -610,9 +640,9 @@ int main(void) {
 
 	// Prepare for loading config via USB
 	const char* usbPath = fatfs_interface.GetUSBPath();
-	snprintf(configFilePath, 100, "%s%s", usbPath, CONFIG_FILE_NAME);
+	snprintf(configFilePath, IO_BUFFER_SIZE, "%s%s", usbPath, CONFIG_FILE_NAME);
 #if LOG_ENABLED
-	snprintf(logFilePath, 100, "%s%s", usbPath, LOG_FILE_NAME);
+	snprintf(logFilePath, IO_BUFFER_SIZE, "%s%s", usbPath, LOG_FILE_NAME);
 #endif
 
 	// ClassActiveCallback appears to only be called when booting from QSPI (or flash?).
@@ -626,7 +656,7 @@ int main(void) {
 	dft.Init();
 	memset(window, 0, sizeof(dft_t)*DFT_SIZE);
 	for (size_t i = 0; i < DFT_SIZE; i++) {
-		window[i] = hann(i / (double)(DFT_SIZE-1));
+		window[i] = hann(i / (double)(DFT_SIZE - 1));
 	}
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		_initOsc(leftOscillators[i], false); // sines
