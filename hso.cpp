@@ -55,7 +55,7 @@ const float BIN_OVERLAP = BIN_WIDTH;
 // amount frequency has to change before processing is affected
 const float FREQUENCY_EPSILON = HALF_BIN_WIDTH;
 // amount stride needs to dip below zero before being treated as negative
-const float STRIDE_EPSILON = 0.001;
+const float STRIDE_EPSILON = BIN_WIDTH / FREQUENCY_MAX;
 
 Hardware hw;
 bool isUsbConnected = false;
@@ -71,7 +71,7 @@ bool isConfigChanged = false;
 // (i.e. not from the audio callback).
 //
 // see: https://forum.electro-smith.com/t/error-reading-file-from-sd-card/3911
-#define IO_BUFFER_SIZE 256
+#define IO_BUFFER_SIZE 100
 FIL file;
 FRESULT fileResult;
 char configFilePath[IO_BUFFER_SIZE];
@@ -315,8 +315,6 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 		lastFrequency = frequency;
 		lastBin = cutoffBin;
 	}
-	//float frequency = baseFrequency;
-	//size_t cutoffBin = baseFrequency * FREQUENCY_TO_BIN + 0.5; // simple round, using truncation
 
 	float baseLevel = 1.0 + resonance;
 	if (isFreezeActive) {
@@ -547,7 +545,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		int resonanceAvg = resonanceTime / LOG_ITERATIONS;
 		int outputAvg = outputTime / LOG_ITERATIONS;
 		int callbackAvg = callbackTime / LOG_ITERATIONS;
-		snprintf(logFileBuffer, 256, "Setup: %i us, Proc: %i us, Rez: %i us, Out: %i us, Total: %i us\n", setupAvg, processAvg, resonanceAvg, outputAvg, callbackAvg);
+		snprintf(logFileBuffer, IO_BUFFER_SIZE, "Setup: %i us, Proc: %i us, Rez: %i us, Out: %i us, Total: %i us\n", setupAvg, processAvg, resonanceAvg, outputAvg, callbackAvg);
 		isLogWritePending = true;
 		// reset
 		logIteration = 0;
