@@ -178,8 +178,8 @@ inline float inverse_lerp(float c, float a, float b) {
 dft_t hann(double phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
 
 float oscillatorPhases[OSCILLATOR_COUNT];
-ITCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
-ITCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
+float leftResonance[AUDIO_BLOCK_SIZE];
+float rightResonance[AUDIO_BLOCK_SIZE];
 
 const Switch* reverseButton;
 bool isReverseActive = false;
@@ -189,10 +189,10 @@ bool isFreezeActive = false;
 bool isFreezeInverted = false; // flips gate interpretation, changed by user input
 
 // variables for tracking averages (for LEDs)
-ITCMRAM Buffer leftSignal; // input signal for left channel (also used for mix)
-ITCMRAM Buffer rightSignal; // input signal for right channel (also used for mix)
-ITCMRAM Buffer leftOuts; // output signal for left channel
-ITCMRAM Buffer rightOuts; // output signal for right channel
+Buffer leftSignal; // input signal for left channel (also used for mix)
+Buffer rightSignal; // input signal for right channel (also used for mix)
+Buffer leftOuts; // output signal for left channel
+Buffer rightOuts; // output signal for right channel
 float leftInTotal = 0;
 float rightInTotal = 0;
 float leftOutTotal = 0;
