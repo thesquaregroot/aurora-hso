@@ -223,9 +223,6 @@ dft_t* rightProcessed = processedSpectrumBuffer + DFT_SIZE;
 dft_t* rightProcessedReal = rightProcessed;
 dft_t* rightProcessedImag = rightProcessed + BIN_COUNT;
 
-float lastFrequency = 0;
-size_t lastBin = 0;
-
 /**
  * Absolute value via square and square rooting, but with a small constant added which
  * allows us to avoid zero.  Provides a continuous way to go to through-zero, as long
@@ -300,20 +297,8 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	dft.Direct(leftSignalBuffer, leftSpectrum);
 	dft.Direct(rightSignalBuffer, rightSpectrum);
 
-	// attempt to stabilize results by only changing target frquency when it has changed
-	bool shouldKeepFrequency = fabsf(baseFrequency - lastFrequency) < FREQUENCY_EPSILON;
-	float frequency;
-	size_t cutoffBin;
-	if (shouldKeepFrequency) {
-		frequency = lastFrequency;
-		cutoffBin = lastBin;
-	}
-	else {
-		frequency = baseFrequency;
-		cutoffBin = round(baseFrequency * FREQUENCY_TO_BIN); // simple round, using truncation
-		lastFrequency = frequency;
-		lastBin = cutoffBin;
-	}
+	float frequency = baseFrequency;
+	size_t cutoffBin = round(baseFrequency * FREQUENCY_TO_BIN);
 
 	float baseLevel = 1.0 + resonance;
 	if (isFreezeActive) {
