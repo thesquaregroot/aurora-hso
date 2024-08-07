@@ -79,7 +79,7 @@ char configFilePath[IO_BUFFER_SIZE];
 char fileLineBuffer[IO_BUFFER_SIZE];
 
 // Logging
-#define LOG_ENABLED 1
+#define LOG_ENABLED 0
 
 #if LOG_ENABLED
 #define LOG_FILE_NAME "HSO.log"
