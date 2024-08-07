@@ -44,13 +44,14 @@ using namespace daisysp;
 #define CONFIG_REVERSE "INVERT_REVERSE"
 #define CONFIG_FREEZE "INVERT_FREEZE"
 
-const float DFT_SIZE_RECIP = 1.0 / DFT_SIZE;
-const int BIN_COUNT = DFT_SIZE / 2;
-const float NYQUIST_FREQUENCY = SAMPLE_RATE / 2.0;
-const float FREQUENCY_TO_BIN = BIN_COUNT / NYQUIST_FREQUENCY;
-const float BIN_WIDTH = NYQUIST_FREQUENCY / BIN_COUNT;
-const float HALF_BIN_WIDTH = BIN_WIDTH / 2.0;
-const float BIN_OVERLAP = BIN_WIDTH;
+constexpr float SAMPLE_RATE_RECIP = 1.0 / SAMPLE_RATE;
+constexpr float DFT_SIZE_RECIP = 1.0 / DFT_SIZE;
+constexpr int BIN_COUNT = DFT_SIZE / 2;
+constexpr float NYQUIST_FREQUENCY = SAMPLE_RATE / 2.0;
+constexpr float FREQUENCY_TO_BIN = BIN_COUNT / NYQUIST_FREQUENCY;
+constexpr float BIN_WIDTH = NYQUIST_FREQUENCY / BIN_COUNT;
+constexpr float HALF_BIN_WIDTH = BIN_WIDTH / 2.0;
+constexpr float BIN_OVERLAP = BIN_WIDTH;
 
 // amount frequency has to change before processing is affected
 const float FREQUENCY_EPSILON = HALF_BIN_WIDTH;
@@ -176,10 +177,9 @@ inline float inverse_lerp(float c, float a, float b) {
 
 dft_t hann(double phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
 
-ITCMRAM Oscillator leftOscillators[OSCILLATOR_COUNT];
-ITCMRAM Oscillator rightOscillators[OSCILLATOR_COUNT];
-DTCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
-DTCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
+float oscillatorPhases[OSCILLATOR_COUNT];
+ITCMRAM float leftResonance[AUDIO_BLOCK_SIZE];
+ITCMRAM float rightResonance[AUDIO_BLOCK_SIZE];
 
 const Switch* reverseButton;
 bool isReverseActive = false;
@@ -478,19 +478,21 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	float dropEnd = strideFactor < 0 ? HARMONIC_MIN : HARMONIC_MAX;
 	float dropStart = strideFactor < 0 ? HARMONIC_DROP_LOW : HARMONIC_DROP_HIGH;
 	// compute sum of oscillations
+	//
+	// in order to easily/more efficient compute the sine and cosine of the phase,
+	// the Oscillator class isn't used, though the logic here is essentially identical
 	float level = 1.0;
 	float resonanceLevelTotal = 0.0;
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
-		Oscillator& l = leftOscillators[i];
-		Oscillator& r = rightOscillators[i];
+		float& phase = oscillatorPhases[i];
 		float frequency = getFrequency(baseFrequency, strideFactor, i);
-		l.SetFreq(frequency);
-		r.SetFreq(frequency);
+		float increment = (TWOPI_F * frequency) * SAMPLE_RATE_RECIP;
 		float dropoff = fclamp(inverse_lerp(frequency, dropEnd, dropStart), 0.f, 1.f);
 		float partialLevel = level * dropoff;
 		for (size_t j = 0; j < size; j++) {
-			leftResonance[j] += partialLevel * l.Process();
-			rightResonance[j] += partialLevel * r.Process();
+			phase += increment - (phase > TWOPI_F ? TWOPI_F : 0);
+			leftResonance[j] += partialLevel * sinf(phase);
+			rightResonance[j] += partialLevel * cosf(phase);
 		}
 		resonanceLevelTotal += level;
 		level *= levelFactor;
@@ -652,10 +654,6 @@ int main(void) {
 	memset(window, 0, sizeof(dft_t)*DFT_SIZE);
 	for (size_t i = 0; i < DFT_SIZE; i++) {
 		window[i] = hann(i / (double)(DFT_SIZE - 1));
-	}
-	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
-		_initOsc(leftOscillators[i], false); // sines
-		_initOsc(rightOscillators[i], true); // cosines
 	}
 	memset(signalBuffer, 0, sizeof(dft_t)*2*DFT_SIZE); // mostly just for easy skipping of process when testing
 
