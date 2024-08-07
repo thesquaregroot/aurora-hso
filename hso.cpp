@@ -1,20 +1,29 @@
-/** Harmonic Shift Operator
+/*
+ * Copyright (c) 2024 Andrew Groot
+ *
+ * Use of this source code is governed by an MIT-style
+ * license that can be found in the LICENSE file or at
+ * https://opensource.org/licenses/MIT.
+ *
+ * ===================================================
  *
  * Inspired by the New System Instruments Harmonic Shift Oscillator, this extends
  * the ideas of harmonic stride and level into a spectral audio processor.
+ * Best thought of as a self-(harmonic-shift)-oscillating stereo filter.
  *
  * Controls:
- *	- Warp: Base frequency coarse adjustment.  CV is exponential FM (V/oct, ranging from -5 to +5 octaves).
- *	- Time: Base frequency fine adjusment (10% range of coarse).  CV is linear FM (20% of frequency).
- *	- Blur: Resonance, with self-oscillation after 75% of knob range.
- *	- Reflect: Haromonic stride (distance between harmonics), ranging from 0 to 5.  However, with CV,
- *				stride can go through-zero and become negative (see Reverse).
+ *	- Warp:        Base frequency coarse adjustment.  CV is exponential FM (V/oct, ranging from -5 to +5 octaves).
+ *	- Time:        Base frequency fine adjusment (10% range of coarse).  CV is linear FM (20% of frequency).
+ *	- Blur:        Resonance, with self-oscillation after 75% of knob range.
+ *	- Reflect:     Haromonic stride (distance between harmonics), ranging from 0 to 5.  However, with CV,
+ *				     stride can go through-zero and become negative (see Reverse).
  *	- Atomosphere: Harmonic level (relative level of each harmonic), ranging from 0 to 1.
- *	- Mix: Blend between dry signal and processed signal.
- *	- Reverse: Changes sign of stride (generate/collect subharmonics instead).
- *	- Freeze: Filter cutoff mode.  Treats the frequency as a cutoff frequency, passing all DFT bins
- *				above (or below if reverse is active), essentially becoming a high-pass (or low-pass)
- *				brick wall filter.  This is the same as when stride is 0 and level is 1.
+ *	- Mix:         Blend between dry signal and processed signal.
+ *	- Reverse:     Changes sign of stride (generate/collect subharmonics instead).
+ *	- Freeze:      Filter cutoff mode.  Treats the frequency as a cutoff frequency, passing all DFT bins
+ *				     above (or below if reverse is active), essentially becoming a high-pass (or low-pass)
+ *				     brick wall filter.  This is the same as when stride is 0 and level is 1.
+ *	- Shift:       Nothing.
  */
 #include <string>
 #include "aurora.h"
