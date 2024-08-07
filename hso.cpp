@@ -59,7 +59,6 @@ const float FREQUENCY_EPSILON = HALF_BIN_WIDTH;
 const float STRIDE_EPSILON = 0.01;
 
 Hardware hw;
-float* cvOffsets;
 bool isUsbConnected = false;
 bool isUsbConfigured = false;
 bool wasConfigLoadAttempted = false;
@@ -430,10 +429,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	float rawResonance = hw.GetKnobValue(KNOB_BLUR) + hw.GetCvValue(CV_BLUR);
 	float resonance = fclamp(rawResonance, 0.0, 2.0);
 	float selfOscillation = fmap(4.0*(resonance - 0.75), 0.0, 1.0);
-	selfOscillation = selfOscillation * selfOscillation; // quadratic curve
+	selfOscillation = selfOscillation * selfOscillation;
 
-	// Reflect Knob/CV - stride (removing cv offset since it seems to interfer thought through-zero processing)
-	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT) - cvOffsets[CV_REFLECT];
+	// Reflect Knob/CV - stride
+	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT);
 	float strideFactor = (isReverseActive ? -5.0 : 5.0) * rawStride;
 
 	// Atmosphere Knob/CV - level
@@ -633,7 +632,6 @@ bool writeConfig() {
 
 int main(void) {
 	hw.Init();
-	hw.GetCvOffsetData(cvOffsets); // used to ignore offset for through-zero stride control
 
 	// Prepare for loading config via USB
 	const char* usbPath = fatfs_interface.GetUSBPath();
