@@ -45,6 +45,9 @@ The resonance control (Blur), boosts the level of the base frequency components
 and, if level is above zero, proportionally boosts the following frequencies as
 well.  When the knob is past 75%, "self-oscillation" will occur, outputting
 waves similar to the original HSO, controlled by stride and level as expected.
+However, unlike the original HSO which theoretically generates all such
+harmonics, this firmware only generates a fixed number of partials (currently 8,
+including the fundamental).
 
 With stride at 0 and level at 1, all frequencies above the frequency are passed,
 creating a kind of brick-wall high-pass filter.
