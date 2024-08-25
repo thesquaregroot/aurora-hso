@@ -307,16 +307,16 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	dft.Direct(rightSignalBuffer, rightSpectrum);
 
 	float frequency = baseFrequency;
-	size_t cutoffBin = round(baseFrequency * FREQUENCY_TO_BIN);
 
 	float baseLevel = 1.0 + resonance;
 	if (isFreezeActive) {
 		memset(processedSpectrumBuffer, 0, sizeof(dft_t)*2*DFT_SIZE); // clear any existing spectrum data
 
+		size_t cutoffBin = fclamp(round(baseFrequency * FREQUENCY_TO_BIN), 0, BIN_COUNT-1);
 		// copy specturm without level adjustments
 		if (isReverseActive) {
 			// reverse -- low pass
-			size_t binsRemaining = cutoffBin + 1;
+			size_t binsRemaining = fclamp(cutoffBin + 1, 0, BIN_COUNT-1);
 			memcpy(leftProcessedReal, leftSpectrumReal, sizeof(dft_t)*binsRemaining);
 			memcpy(leftProcessedImag, leftSpectrumImag, sizeof(dft_t)*binsRemaining);
 			memcpy(rightProcessedReal, rightSpectrumReal, sizeof(dft_t)*binsRemaining);
@@ -418,6 +418,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	baseFrequency += 0.2 * baseFrequency * hw.GetCvValue(CV_TIME);
 	// Warp CV - exponential FM
 	baseFrequency *= powf(2.0, hw.GetWarpVoct() / 12.0); // -2^5 to 2^5 of post-linear-FM frequency
+	baseFrequency = fclamp(baseFrequency, HARMONIC_DROP_LOW, HARMONIC_DROP_HIGH);
 
 	// Blur Knob/CV - resonance
 	float rawResonance = hw.GetKnobValue(KNOB_BLUR) + hw.GetCvValue(CV_BLUR);
