@@ -43,11 +43,13 @@ of 20% of the frequency).
 
 The resonance control (Blur), boosts the level of the base frequency components
 and, if level is above zero, proportionally boosts the following frequencies as
-well.  When the knob is past 75%, "self-oscillation" will occur, outputting
+well.  When the knob is past 50%, "self-oscillation" will occur, outputting
 waves similar to the original HSO, controlled by stride and level as expected.
 However, unlike the original HSO which theoretically generates all such
 harmonics, this firmware only generates a fixed number of partials (currently 8,
-including the fundamental).
+including the fundamental).  However, as the resonance is pushed further (or if
+the output level is higher due to also processing a signal, the output waves are
+then folded, leading to additional harmonics.
 
 With stride at 0 and level at 1, all frequencies above the frequency are passed,
 creating a kind of brick-wall high-pass filter.
@@ -60,12 +62,17 @@ sending a negative CV value to the stride (Reflect) CV input.  In general, the
 knob and CV values are added together.  If reverse is active, this value is then
 negated.  Sub-harmonics are targeted whenever this final value is negative.
 
-The freeze button activates a more explicit filter mode, disconnecting the
-stride and level controls from input processing.  Only the base frequency is
-boosted with resonance, other passed frequencies are at unity gain. However,
-when resonance is boosted to self-oscillation, the stride and level controls
-can still affect the generated wave-shape, allowing for a wide range of possible
-sounds, even without modulating the frequency.
+The freeze button activates a more explicit filter mode, altering the behavior
+of the stride and level controls with respect to input processing. As resonance
+increases, the cutoff frequency level is boosted, which other passed frequencies
+are at unity gain. Increasing stride spreads the cutoff boosting to adjacent FFT
+bins, while level controls the drop-off of this adjacent boosting.  With stride
+and level at maximum, a flat boost will be applied at the edge of the pass band.
+When resonance is boosted to self-oscillation, the stride and level controls
+still affect the generated wave-shape, allowing for a wide range of possible
+sounds, even without modulating the frequency.  Depending on the input signal,
+resonance can boost the signal enough to lead to some wave folding, even before
+self-oscillation kicks in.
 
 The states of the reverse and freeze buttons can be temporarily toggled
 with gates to their respective CV inputs.  Pressing the button inverts the way
@@ -98,27 +105,28 @@ Ensure that the freeze control is off (not lit up).  Send a signal to the left
 their ranges.  Adjust the frequency until your hear output and adjust the
 parameters until you get something you like.
 
-This can be a great way to turn a noisy source (even white noise) into something
-more musical.  Note, however, that the output level may be fairly low, since the
-targeted harmonics may already have a low level in the input signal.
+This can be a bit like filtering the input, but with a result that is almost
+always simple enough to be musical.  Note, however, that the output level may be
+fairly low, since the targeted harmonics may already have a low level in the
+input signal.  Experimenting with the resonance and level controls may help you
+dial in an appropriate output level.
 
 It you want to lock onto specific partials of your input, the following process
 seems to work best.  Use the coarse frequency (Warp) to find a rough starting
 point.  Next adjust stride and level until you're getting close to the output
-you want.  For example, the may be some desired partials going in and out.
+you want.  For example, there may be some desired partials going in and out.
 Finally adjust the fine tuning (Time) until you've zeroed in on an output you
 like.
 
 There will likely always be some subtle movement to the sound, especially if
 level is fairly high, due to fact that the calculations for higher order
 harmonics (or sub-harmonics) are very sensitive to the frequency and stride
-values, which subject to noise from their respective controls.  It's best to
-view this as a kind of subtle chaotic modulation. :)
+values.  It's best to view this as a kind of subtle chaotic modulation. :)
 
-### Harmonic Shift Oscillator
+### Harmonic Shift Oscillator with Wave Folding
 
-Without an input signal, set the resonance (Blur) to its maximum value to
-trigger HSO-style self-oscillation, controlled by the frequency (Warp/Time), stride
+Without an input signal, set the resonance (Blur) to about 60% (~1 o'clock) to
+yield HSO-style self-oscillation, controlled by the frequency (Warp/Time), stride
 (Reflect), and level (Atmosphere) controls.  The left and right channel outputs
 are always 90 degrees out of phase with one another, as with the original HSO.
 
@@ -126,9 +134,15 @@ Between the coarse and fine tune (Warp and Time knobs), and the exponential FM
 (Warp CV, V/oct) and linear FM (Time CV) inputs, a wide array of harmonic and
 in-harmonic sounds are possible.
 
-Note however, that due to soft clipping on the outputs, setting resonance all
-the way up may introduce some saturation beyond the expected spectrum.  Dialing
-back the resonance some (~3 o'clock) avoid this if it is not desired.
+Pushing the resonance higher will start to push the signal into wave folding,
+adding further complexity to the generated spectrum.  Given that many
+oscillation settings have a beating to them, this acts as a natural modulation
+to the wave folding level, which can be very nice.
+
+It is also important to note that the wavefolding can get very aggressive as the
+gain increases, so it's best not to jump straight to turning the knob fully
+clockwise.  That said, if you want even more, the resonance (blur) CV input can
+be used to push the resonance beyond what is possible with the knob alone.
 
 ### Stereo Brick-wall Filter
 
@@ -139,7 +153,9 @@ reverse disable.  Now listen to the left and right outputs and adjust the
 other controls as desired.
 
 Due to the sharp cutoff, you can often hear individual harmonics from the input
-signal drop off or appear as the frequency changes.
+signal drop off or appear as the frequency changes.  Don't forget to use the
+resonance, stride, and level controls to change the behavior at and around the
+cutoff frequency.
 
 ## Installing
 

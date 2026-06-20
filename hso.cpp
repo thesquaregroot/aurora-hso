@@ -14,15 +14,17 @@
  * Controls:
  *	- Warp:        Base frequency coarse adjustment.  CV is exponential FM (V/oct, ranging from -5 to +5 octaves).
  *	- Time:        Base frequency fine adjusment (10% range of coarse).  CV is linear FM (20% of frequency).
- *	- Blur:        Resonance, with self-oscillation after 75% of knob range.
+ *	- Blur:        Resonance, with self-oscillation after 50% of knob range.
  *	- Reflect:     Haromonic stride (distance between harmonics), ranging from 0 to 5.  However, with CV,
- *				     stride can go through-zero and become negative (see Reverse).
- *	- Atomosphere: Harmonic level (relative level of each harmonic), ranging from 0 to 1.
+ *						stride can go through-zero and become negative (see Reverse).  With Freeze enabled,
+ *						controls the width of the resonant peak.
+ *	- Atomosphere: Harmonic level (relative level of each harmonic), ranging from 0 to 1.  With freeze enabled,
+ *						controls the slope of the resonant peak.
  *	- Mix:         Blend between dry signal and processed signal.
  *	- Reverse:     Changes sign of stride (generate/collect subharmonics instead).
  *	- Freeze:      Filter cutoff mode.  Treats the frequency as a cutoff frequency, passing all DFT bins
- *				     above (or below if reverse is active), essentially becoming a high-pass (or low-pass)
- *				     brick wall filter.  This is the same as when stride is 0 and level is 1.
+ *						above (or below if reverse is active), essentially becoming a high-pass (or low-pass)
+ *						brick wall filter.  This is the same as when stride is 0 and level is 1.
  *	- Shift:       Nothing.
  */
 #include <string>
@@ -38,16 +40,18 @@ using namespace daisysp;
 
 #define SAMPLE_RATE 48000
 #define AUDIO_BLOCK_SIZE 256
-#define DFT_SIZE 4096
-#define OSCILLATOR_COUNT 8
+#define DFT_SIZE 2048
+#define OSCILLATOR_COUNT 12
 
-#define FREQUENCY_MIN 20
+#define FREQUENCY_MIN 40
 #define FREQUENCY_MAX 16000
 
-#define HARMONIC_MIN 1
-#define HARMONIC_DROP_LOW 5
+#define HARMONIC_MIN 20
+#define HARMONIC_DROP_LOW 39
 #define HARMONIC_DROP_HIGH 20000
 #define HARMONIC_MAX 24000
+
+#define SELF_OSCILLATION_CUTOFF 0.5
 
 #define CONFIG_FILE_NAME "HSO.txt"
 #define CONFIG_REVERSE "INVERT_REVERSE"
@@ -176,11 +180,11 @@ public:
 typedef _RingBuffer<dft_t, DFT_SIZE> Buffer;
 
 inline float lerp(float a, float b, float t) {
-	return a + t * (b - a);
+	return (1 - t) * a + t * b;
 }
 
-inline float inverse_lerp(float c, float a, float b) {
-	return (c - a) / (b - a);
+inline float inverse_lerp(float a, float b, float v) {
+	return (v - a) / (b - a);
 }
 
 dft_t hann(double phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
@@ -263,10 +267,10 @@ inline float getStrideEpsilon(const float frequency, bool isNegative) {
  * compute the level for that index, we are often raising level factor to high powers.
  *
  * powf was too slow and fastpower resulted in glitchiness when level factor was near zero.
- * However, we can take advantage of the facts that the power and base are always positive.
+ * However, we can take advantage of the fact that the power and base are always positive.
  */
 float levelPower(float base, uint32_t power) {
-	float result = 1;
+	float result = 1.0f;
 	while (power > 0) {
 		if (power % 2 == 1) {
 			result *= base;
@@ -308,7 +312,6 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 
 	float frequency = baseFrequency;
 
-	float baseLevel = 1.0 + resonance;
 	if (isFreezeActive) {
 		memset(processedSpectrumBuffer, 0, sizeof(dft_t)*2*DFT_SIZE); // clear any existing spectrum data
 
@@ -330,16 +333,38 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 			memcpy(rightProcessedReal+cutoffBin, rightSpectrumReal+cutoffBin, sizeof(dft_t)*binsRemaining);
 			memcpy(rightProcessedImag+cutoffBin, rightSpectrumImag+cutoffBin, sizeof(dft_t)*binsRemaining);
 		}
-		// boost cutoff freqeuncy (resonance)
-		leftProcessedReal[cutoffBin] *= baseLevel;
-		leftProcessedImag[cutoffBin] *= baseLevel;
-		rightProcessedReal[cutoffBin] *= baseLevel;
-		rightProcessedImag[cutoffBin] *= baseLevel;
+		// boost cutoff (resonance)
+		//   since freeze essentially disables the strides and level controls for processing,
+		//   let's use them anyway to control the width and distribution of the resonance
+		int positiveStride = fabsf(strideFactor);
+		float strideFraction = positiveStride - (int)positiveStride;
+		int resonanceWidth = ceil(positiveStride);
+
+		int startIndex = isReverseActive ? -resonanceWidth : 0;
+		int endIndex = isReverseActive ? 0 : resonanceWidth;
+		for (int i=startIndex; i<=endIndex; i++) {
+			int resonanceBin = cutoffBin + i;
+			if (resonanceBin < 0 || resonanceBin > BIN_COUNT -1) {
+				continue;
+			}
+			// strideIncrease allows stride to act as a continuous control, increasing
+			// the levels until a new bin is added, when it drops back to zero, the decrease
+			// in gain potentially being offset by the additional bins.  This creates a kind
+			// of rising and then falling and widening action as stride is increased
+			int positiveI = fabsf(i);
+			float strideIncrease = strideFraction * (positiveI + 1) / (float) (resonanceWidth + 1);
+			float binMultiplier = 1.0f + 4.0 * resonance * (levelPower(levelFactor, positiveI) + strideIncrease);
+			leftProcessedReal[resonanceBin] *= binMultiplier;
+			leftProcessedImag[resonanceBin] *= binMultiplier;
+			rightProcessedReal[resonanceBin] *= binMultiplier;
+			rightProcessedImag[resonanceBin] *= binMultiplier;
+		}
 	}
 	else {
+		float baseLevel = 1.0 + 4.0f * resonance;
 		// due to noisy controls, and the fact that crossing zero for processing can have
 		// a pretty drastic/sudden effect, this adds some buffer depending on the mode
-		// to minimize the likely that processing switching directions unexpectedly
+		// to minimize the likelihood of switching directions unexpectedly
 		bool isStrideNegative = isReverseActive ? (strideFactor < STRIDE_EPSILON) : (strideFactor < -STRIDE_EPSILON);
 
 		// since some of the calculations below require dividing by the stride
@@ -384,8 +409,19 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	dft.Inverse(rightProcessed, rightSignalBuffer);
 }
 
+// Sine folding with cubic waveshaping.
+// Inspired by https://ccrma.stanford.edu/~jatin/ComplexNonlinearities/Wavefolder.html
+// I wanted something that was relatively linear on [-1, 1], but that had a good amount
+// of folding at higher gain.
+//
+// I found this experimentally in desmos experimentally:
+//	sin( pi/4 * (0.5 x^3 + 1.2 x) )
+inline dft_t cubicSineFold(dft_t value) {
+	return sinf(M_PI_4 * (0.5f * value*value*value + 1.2*value) );
+}
+
 inline dft_t limit(dft_t value) {
-	return SoftClip(value);
+	return cubicSineFold(value);
 }
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size) {
@@ -422,9 +458,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 
 	// Blur Knob/CV - resonance
 	float rawResonance = hw.GetKnobValue(KNOB_BLUR) + hw.GetCvValue(CV_BLUR);
-	float resonance = fclamp(rawResonance, 0.0, 2.0);
-	float selfOscillation = fmap(4.0*(resonance - 0.75), 0.0, 1.0);
-	selfOscillation = selfOscillation * selfOscillation;
+	float resonance = fclamp(rawResonance, 0.0, 1.5);
+	// Scale resonance after cutoff for self-oscillation, for example:
+	//		Max knob only:     (1.0 - 0.5) / (1.0 - 0.5) = 1.0
+	//		Max knob and CV:   (1.5 - 0.5) / (1.0 - 0.5) = 2.0
+	float selfOscillation = (resonance - SELF_OSCILLATION_CUTOFF) / (1.0 - SELF_OSCILLATION_CUTOFF);
+	// Scale so gain is 4.0 with knob only, 8.0 max
+	selfOscillation = fclamp(4.0 * selfOscillation, 0.0, 8.0);
 
 	// Reflect Knob/CV - stride
 	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT);
@@ -457,7 +497,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	uint32_t processStart = System::GetTick();
 #endif
 
-	processSignals(baseFrequency, strideFactor, levelFactor, resonance);
+	// scale FFT resonance so that min self-oscillation means fft resonance of 1.0
+	float fftResonance = resonance / SELF_OSCILLATION_CUTOFF;
+	processSignals(baseFrequency, strideFactor, levelFactor, fftResonance);
 
 #if LOG_ENABLED
 	uint32_t processEnd = System::GetTick();
@@ -469,11 +511,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	memset(leftResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
 	memset(rightResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
 	// determine where we might drop partials
-	float dropEnd = strideFactor < 0 ? HARMONIC_MIN : HARMONIC_MAX;
 	float dropStart = strideFactor < 0 ? HARMONIC_DROP_LOW : HARMONIC_DROP_HIGH;
+	float dropEnd = strideFactor < 0 ? HARMONIC_MIN : HARMONIC_MAX;
 	// compute sum of oscillations
 	//
-	// in order to easily/more efficient compute the sine and cosine of the phase,
+	// in order to easily/more efficiently compute both the sine and cosine of the phase,
 	// the Oscillator class isn't used, though the logic here is essentially identical
 	float level = 1.0;
 	float resonanceLevelTotal = 0.0;
@@ -481,7 +523,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		float& phase = oscillatorPhases[i];
 		float frequency = getFrequency(baseFrequency, strideFactor, i);
 		float increment = (TWOPI_F * frequency) * SAMPLE_RATE_RECIP;
-		float dropoff = fclamp(inverse_lerp(frequency, dropEnd, dropStart), 0.f, 1.f);
+		float dropoff = 1.0 - fclamp(inverse_lerp(dropStart, dropEnd, frequency), 0.0, 1.0);
 		float partialLevel = level * dropoff;
 		for (size_t j = 0; j < size; j++) {
 			phase += increment - (phase > TWOPI_F ? TWOPI_F : 0);
@@ -548,16 +590,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		callbackTime = 0;
 	}
 #endif
-}
-
-void _initOsc(Oscillator& osc, bool isCosine) {
-	osc.Init(hw.AudioSampleRate());
-	osc.SetWaveform(Oscillator::WAVE_SIN);
-	osc.SetFreq(FREQUENCY_MIN);
-	osc.SetAmp(1.0);
-	if (isCosine) {
-		osc.PhaseAdd(0.25);
-	}
 }
 
 void USBConnectCallback(void* userdata) {
