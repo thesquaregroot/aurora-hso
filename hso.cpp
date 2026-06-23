@@ -511,8 +511,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	memset(leftResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
 	memset(rightResonance, 0, sizeof(float)*AUDIO_BLOCK_SIZE);
 	// determine where we might drop partials
-	float dropStart = strideFactor < 0 ? HARMONIC_DROP_LOW : HARMONIC_DROP_HIGH;
-	float dropEnd = strideFactor < 0 ? HARMONIC_MIN : HARMONIC_MAX;
+	float dropStart = strideFactor > 0 ? HARMONIC_DROP_HIGH : HARMONIC_DROP_LOW;
+	float dropEnd = strideFactor > 0 ? HARMONIC_MAX : HARMONIC_MIN;
 	// compute sum of oscillations
 	//
 	// in order to easily/more efficiently compute both the sine and cosine of the phase,
@@ -522,13 +522,18 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	for (size_t i = 0; i < OSCILLATOR_COUNT; i++) {
 		float& phase = oscillatorPhases[i];
 		float frequency = getFrequency(baseFrequency, strideFactor, i);
-		float increment = (TWOPI_F * frequency) * SAMPLE_RATE_RECIP;
-		float dropoff = 1.0 - fclamp(inverse_lerp(dropStart, dropEnd, frequency), 0.0, 1.0);
-		float partialLevel = level * dropoff;
-		for (size_t j = 0; j < size; j++) {
-			phase += increment - (phase > TWOPI_F ? TWOPI_F : 0);
-			leftResonance[j] += partialLevel * sinf(phase);
-			rightResonance[j] += partialLevel * cosf(phase);
+		// No need to keep tracking the phase above the harmonic max,
+		// especially since the increment could get very large.
+		// However, we still want to iterate to get the correct resonance level total.
+		if (frequency < HARMONIC_MAX) {
+			float increment = (TWOPI_F * frequency) * SAMPLE_RATE_RECIP;
+			float dropoff = 1.0 - fclamp(inverse_lerp(dropStart, dropEnd, frequency), 0.0, 1.0);
+			float partialLevel = level * dropoff;
+			for (size_t j = 0; j < size; j++) {
+				phase += increment - (phase > TWOPI_F ? TWOPI_F : 0);
+				leftResonance[j] += partialLevel * sinf(phase);
+				rightResonance[j] += partialLevel * cosf(phase);
+			}
 		}
 		resonanceLevelTotal += level;
 		level *= levelFactor;
