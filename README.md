@@ -85,16 +85,44 @@ The mix control works as one might expect, fading from the dry signal (CCW) to
 the wet signal (CW).  Because the processing introduces a delay, the input signal
 is delayed by the same amount to ensure the signals being mixed are in-sync.
 
-Currently, the shift button does nothing.
+A design goal for this firmware was to keep the interface as knob-per-function
+as possible.  However, this meant that the shift button was left unused.  But
+it's there, so as a bonus, pressing the shift button will trigger an
+attack-decay envelope.  This does three things simultaneously: (1) increase the
+gain going into the wave folder, (2) add an offset to each channel (positive for
+the left channel, negative for right) pre-wave-folder, leading to asymmetrical
+saturation/wave folding, and (3) shifts the mix balance toward fully wet.  The
+primary use of this is to trigger a manual percussive hit which, depending on
+the settings, can range from soft and bell-like to harsh and noisy.  It can also
+be useful in a feedback loop to give the system a kick after it has died off.
 
-Finally the front-panel LEDs show estimates of the signal levels.  Along the
-top, the left input signal level is shown in purple and the output level is
-shown in green near the bend at the top-right.  In cyan between them is the
-average of these two levels.  The same is done for the right input and output
-signals going down the right side of the module.  The reverse and freeze button
-LEDs are white whenever their respective mode is active, and off when in the
-default state (e.g. if the user enables filter mode with the freeze button but
-also sends a high gate signal to the input, the light will be off).
+The envelope settings can be edited using the file `HSO.txt`.  This will be
+automatically created to track the reverse/freeze settings of the last run, but
+the following properties can be added to edit the shift envelope:
+
+Setting | Description | Default Value
+--- | --- | ---
+SHIFT_ATTACK | Attack stage time in seconds. | 0.1
+SHIFT_DECAY | Decay stage time in seconds. | 1.9
+SHIFT_CURVE | Envelope curve, -100 to 100. | -5
+SHIFT_GAIN | Total gain increase at maximum envelope value. | 5
+SHIFT_OFFSET | Maximum offset applied to each channel. | 0.5
+
+Finally the front-panel LEDs show estimates of the signal levels.  The left
+channel LEDs are along the top, while the right channel LEDs are along the
+right. For each, the input signal level is shown in purple and the output level
+is shown in green (left-to-right, top-to-bottom).  In cyan between them is the
+average of these two levels.  As the output signals push into wave folding the
+green output LEDs will turn yellow when saturating/slightly folding, and then
+orange when folding is more pronounced.  As folding increases further, the
+output LEDs will eventually go red and the cyan LEDs will turn white, a state
+which is all but certain to be very noisy.  Note that this requires either an
+input signal, or CV increasing the resonance past the max knob control level.
+
+The reverse and freeze button LEDs are white whenever their respective mode is
+active, and off when in the default state (e.g. if the user enables filter mode
+with the freeze button but also sends a high gate signal to the input, the
+light will be off).
 
 ## Use Cases
 
@@ -156,6 +184,18 @@ Due to the sharp cutoff, you can often hear individual harmonics from the input
 signal drop off or appear as the frequency changes.  Don't forget to use the
 resonance, stride, and level controls to change the behavior at and around the
 cutoff frequency.
+
+### Manually-triggered Wave Folding Synth Voice
+
+Since the attack-delay envelope triggered by the shift button affects the mix
+setting, it is possible set the module up for manual "pings," akin to a synth
+voice made up of an oscillator, into a wave folder, into a VCA.
+
+With no input, set the mix knob to the minimum (CCW) setting.  Regardless of the
+other settings, this should yield silence since there is no input.  Next set the
+resonance (blur knob) past noon to yield self-oscillation.  The LEDs will light
+up, but there will still be no sound.  Finally, press the shift button to
+trigger the envelope, yielding a one-off percussive hit.
 
 ## Installing
 

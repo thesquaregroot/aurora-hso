@@ -25,12 +25,15 @@
  *	- Freeze:      Filter cutoff mode.  Treats the frequency as a cutoff frequency, passing all DFT bins
  *						above (or below if reverse is active), essentially becoming a high-pass (or low-pass)
  *						brick wall filter.  This is the same as when stride is 0 and level is 1.
- *	- Shift:       Nothing.
+ *	- Shift:       Triggers an attack-decay envelope affecting the output gain (pre-wavefolder) as well as
+ *						applying a slight offset (positive for left channel, negative for right), causing
+ *						asymmetrical wavefolding.
  */
 #include <string>
 #include "aurora.h"
 #include "daisysp.h"
 #include "fft/shy_fft.h"
+#include "follower/follower.h"
 
 using namespace std;
 using namespace stmlib;
@@ -47,15 +50,21 @@ using namespace daisysp;
 #define FREQUENCY_MAX 16000
 
 #define HARMONIC_MIN 20
-#define HARMONIC_DROP_LOW 39
+#define HARMONIC_DROP_LOW 40
 #define HARMONIC_DROP_HIGH 20000
 #define HARMONIC_MAX 24000
 
 #define SELF_OSCILLATION_CUTOFF 0.5
+#define SELF_OSCILLATION_MAX 8
 
 #define CONFIG_FILE_NAME "HSO.txt"
 #define CONFIG_REVERSE "INVERT_REVERSE"
 #define CONFIG_FREEZE "INVERT_FREEZE"
+#define CONFIG_SHIFT_ATTACK "SHIFT_ATTACK"
+#define CONFIG_SHIFT_DECAY "SHIFT_DECAY"
+#define CONFIG_SHIFT_CURVE "SHIFT_CURVE"
+#define CONFIG_SHIFT_GAIN "SHIFT_GAIN"
+#define CONFIG_SHIFT_OFFSET "SHIFT_OFFSET"
 
 constexpr float SAMPLE_RATE_RECIP = 1.0 / SAMPLE_RATE;
 constexpr float DFT_SIZE_RECIP = 1.0 / DFT_SIZE;
@@ -177,7 +186,7 @@ public:
 	}
 };
 
-typedef _RingBuffer<dft_t, DFT_SIZE> Buffer;
+typedef _RingBuffer<dft_t, DFT_SIZE> SignalBuffer;
 
 inline float lerp(float a, float b, float t) {
 	return (1 - t) * a + t * b;
@@ -189,6 +198,8 @@ inline float inverse_lerp(float a, float b, float v) {
 
 dft_t hann(double phase) { return 0.5 * (1 - cos(2 * M_PI * phase)); }
 
+SignalBuffer leftSignal;
+SignalBuffer rightSignal;
 float oscillatorPhases[OSCILLATOR_COUNT];
 float leftResonance[AUDIO_BLOCK_SIZE];
 float rightResonance[AUDIO_BLOCK_SIZE];
@@ -200,15 +211,20 @@ const Switch* freezeButton;
 bool isFreezeActive = false;
 bool isFreezeInverted = false; // flips gate interpretation, changed by user input
 
-// variables for tracking averages (for LEDs)
-Buffer leftSignal; // input signal for left channel (also used for mix)
-Buffer rightSignal; // input signal for right channel (also used for mix)
-Buffer leftOuts; // output signal for left channel
-Buffer rightOuts; // output signal for right channel
-float leftInTotal = 0;
-float rightInTotal = 0;
-float leftOutTotal = 0;
-float rightOutTotal = 0;
+#define DEFAULT_SHIFT_ENVELOPE_GAIN 5
+#define DEFAULT_SHIFT_ENVELOPE_OFFSET 0.5f
+#define DEFAULT_SHIFT_ENVELOPE_ATTACK 0.1
+#define DEFAULT_SHIFT_ENVELOPE_DECAY 1.9
+#define DEFAULT_SHIFT_ENVELOPE_CURVE -5
+
+const Switch* shiftButton;
+AdEnv shiftEnvelope;
+float shiftEnvelopeSamples[AUDIO_BLOCK_SIZE];
+float shiftEnvelopeGain = DEFAULT_SHIFT_ENVELOPE_GAIN;
+float shiftEnvelopeOffset = DEFAULT_SHIFT_ENVELOPE_OFFSET;
+float shiftEnvelopeAttack = DEFAULT_SHIFT_ENVELOPE_ATTACK;
+float shiftEnvelopeDecay = DEFAULT_SHIFT_ENVELOPE_DECAY;
+float shiftEnvelopeCurve = DEFAULT_SHIFT_ENVELOPE_CURVE;
 
 // variables for DFT
 DTCMRAM ShyFFT<dft_t, DFT_SIZE> dft;
@@ -235,6 +251,13 @@ dft_t* leftProcessedImag = leftProcessed + BIN_COUNT;
 dft_t* rightProcessed = processedSpectrumBuffer + DFT_SIZE;
 dft_t* rightProcessedReal = rightProcessed;
 dft_t* rightProcessedImag = rightProcessed + BIN_COUNT;
+
+// for LED updates
+typedef Follower<dft_t, SAMPLE_RATE> LedFollower;
+LedFollower leftInFollower;
+LedFollower rightInFollower;
+LedFollower leftOutFollower;
+LedFollower rightOutFollower;
 
 /**
  * Absolute value via square and square rooting, but with a small constant added which
@@ -440,6 +463,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		isFreezeInverted = !isFreezeInverted;
 		isConfigChanged = true;
 	}
+	if (shiftButton->RisingEdge()) {
+		shiftEnvelope.Trigger();
+	}
 
 	bool reverseGateState = hw.GetGateState(GATE_REVERSE);
 	bool freezeGateState = hw.GetGateState(GATE_FREEZE);
@@ -464,7 +490,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	//		Max knob and CV:   (1.5 - 0.5) / (1.0 - 0.5) = 2.0
 	float selfOscillation = (resonance - SELF_OSCILLATION_CUTOFF) / (1.0 - SELF_OSCILLATION_CUTOFF);
 	// Scale so gain is 4.0 with knob only, 8.0 max
-	selfOscillation = fclamp(4.0 * selfOscillation, 0.0, 8.0);
+	selfOscillation = fclamp(SELF_OSCILLATION_MAX / 2 * selfOscillation, 0.0, SELF_OSCILLATION_MAX);
 
 	// Reflect Knob/CV - stride
 	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT);
@@ -479,16 +505,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 
 	// Collect input signals
 	for (size_t i = 0; i < size; i++) {
-		// update running totals
-		if (leftSignal.size() == DFT_SIZE) {
-			leftInTotal -= fabsf(leftSignal[0]);
-			rightInTotal -= fabsf(rightSignal[0]);
-		}
-		leftInTotal += fabsf(in[0][i]);
-		rightInTotal += fabsf(in[1][i]);
 		// store new values
 		leftSignal.put(in[0][i]);
 		rightSignal.put(in[1][i]);
+		// follow input
+		leftInFollower.Process(in[0][i]);
+		rightInFollower.Process(in[1][i]);
+		// store envelope values
+		shiftEnvelopeSamples[i] = shiftEnvelope.Process();
 	}
 
 #if LOG_ENABLED
@@ -550,25 +574,22 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		size_t index = DFT_SIZE/2 - size/2 + i; // read from center of processed signal
 		// get outputs
 		float signalScale = DFT_SIZE_RECIP / window[index]; // adjust for DFT scale and window distortion
-		float leftRaw = leftSignalBuffer[index] * signalScale;
-		float rightRaw = rightSignalBuffer[index] * signalScale;
-		float leftRes = leftResonance[i] * resonanceScale;
-		float rightRes = rightResonance[i] * resonanceScale;
-		dft_t leftValue = limit(leftRaw + leftRes);
-		dft_t rightValue = limit(rightRaw + rightRes);
-		// update running totals
-		if (leftOuts.size() == DFT_SIZE) {
-			leftOutTotal -= fabsf(leftOuts[0]);
-			rightOutTotal -= fabsf(rightOuts[0]);
-		}
-		leftOutTotal += fabsf(leftValue);
-		rightOutTotal += fabsf(rightValue);
-		// store new values
-		leftOuts.put(leftValue);
-		rightOuts.put(rightValue);
+		float leftRaw = leftSignalBuffer[index] * signalScale + leftResonance[i] * resonanceScale;
+		float rightRaw = rightSignalBuffer[index] * signalScale + rightResonance[i] * resonanceScale;
+		float shiftGain = 1.0f + shiftEnvelopeSamples[i] * (shiftEnvelopeGain - 1);
+		float shiftOffset = shiftEnvelopeSamples[i] * shiftEnvelopeOffset;
+		float leftPreLimiting = leftRaw * shiftGain + shiftOffset;
+		float rightPreLimiting = rightRaw * shiftGain - shiftOffset;
+		// follow pre-limiting/folding values
+		leftOutFollower.Process(leftPreLimiting);
+		rightOutFollower.Process(rightPreLimiting);
+		// true outputs
+		dft_t leftValue = limit(leftPreLimiting);
+		dft_t rightValue = limit(rightPreLimiting);
 		// mix with input signal (with same delay)
-		out[0][i] = (leftSignal[index] * (1.f - mix)) + (leftValue * mix);
-		out[1][i] = (rightSignal[index] * (1.f - mix)) + (rightValue * mix);
+		float sampleMix = fclamp(mix + shiftEnvelopeSamples[i], 0.0f, 1.0f);
+		out[0][i] = (leftSignal[index] * (1.f - sampleMix)) + (leftValue * sampleMix);
+		out[1][i] = (rightSignal[index] * (1.f - sampleMix)) + (rightValue * sampleMix);
 	}
 
 #if LOG_ENABLED
@@ -636,6 +657,24 @@ bool loadConfig() {
 		else if (key == CONFIG_FREEZE) {
 			isFreezeInverted = atoi(value.c_str()) > 0;
 		}
+		else if (key == CONFIG_SHIFT_ATTACK) {
+			shiftEnvelopeAttack = atof(value.c_str());
+			shiftEnvelope.SetTime(ADENV_SEG_ATTACK, shiftEnvelopeAttack);
+		}
+		else if (key == CONFIG_SHIFT_DECAY) {
+			shiftEnvelopeDecay = atof(value.c_str());
+			shiftEnvelope.SetTime(ADENV_SEG_DECAY, shiftEnvelopeDecay);
+		}
+		else if (key == CONFIG_SHIFT_CURVE) {
+			shiftEnvelopeCurve = atof(value.c_str());
+			shiftEnvelope.SetCurve(shiftEnvelopeCurve);
+		}
+		else if (key == CONFIG_SHIFT_GAIN) {
+			shiftEnvelopeGain = atof(value.c_str());
+		}
+		else if (key == CONFIG_SHIFT_OFFSET) {
+			shiftEnvelopeOffset = atof(value.c_str());
+		}
 	}
 	f_close(&file);
 	return true;
@@ -658,6 +697,19 @@ bool writeConfig() {
 	f_puts(isReverseInverted ? "=1\n" : "=0\n", &file);
 	f_puts(CONFIG_FREEZE, &file);
 	f_puts(isFreezeInverted ? "=1\n" : "=0\n", &file);
+
+	char buffer[100];
+	snprintf(buffer, 100, "%s=%g\n", CONFIG_SHIFT_ATTACK, shiftEnvelopeAttack);
+	f_puts(buffer, &file);
+	snprintf(buffer, 100, "%s=%g\n", CONFIG_SHIFT_DECAY, shiftEnvelopeDecay);
+	f_puts(buffer, &file);
+	snprintf(buffer, 100, "%s=%g\n", CONFIG_SHIFT_CURVE, shiftEnvelopeCurve);
+	f_puts(buffer, &file);
+	snprintf(buffer, 100, "%s=%g\n", CONFIG_SHIFT_GAIN, shiftEnvelopeGain);
+	f_puts(buffer, &file);
+	snprintf(buffer, 100, "%s=%g\n", CONFIG_SHIFT_OFFSET, shiftEnvelopeOffset);
+	f_puts(buffer, &file);
+
 	f_close(&file);
 	return true;
 }
@@ -689,6 +741,12 @@ int main(void) {
 
 	reverseButton = &hw.GetButton(SW_REVERSE);
 	freezeButton = &hw.GetButton(SW_FREEZE);
+	shiftButton = &hw.GetButton(SW_SHIFT);
+
+	shiftEnvelope.Init(SAMPLE_RATE);
+	shiftEnvelope.SetTime(ADENV_SEG_ATTACK, shiftEnvelopeAttack);
+	shiftEnvelope.SetTime(ADENV_SEG_DECAY, shiftEnvelopeDecay);
+	shiftEnvelope.SetCurve(shiftEnvelopeCurve);
 
 	// ready to start audio
 	hw.SetAudioBlockSize(AUDIO_BLOCK_SIZE);
@@ -721,24 +779,32 @@ int main(void) {
 			}
 #endif
 		}
-		// Update LEDs
-		float leftInAvg = 2.0 * leftInTotal * DFT_SIZE_RECIP;
-		float rightInAvg = 2.0 * rightInTotal * DFT_SIZE_RECIP;
-		float leftOutAvg = 2.0 * leftOutTotal * DFT_SIZE_RECIP;
-		float rightOutAvg = 2.0 * rightOutTotal * DFT_SIZE_RECIP;
-		float leftMid = (leftInAvg + leftOutAvg) / 2;
-		float rightMid = (rightInAvg + rightOutAvg) / 2;
+		// Button LEDs
 		hw.SetLed(LED_REVERSE, isReverseActive ? colorWhite : colorOff);
 		hw.SetLed(LED_FREEZE, isFreezeActive ? colorWhite : colorOff);
+		// Signal LEDs
+
+		float leftInLevel = leftInFollower.lastValue;
+		float rightInLevel = rightInFollower.lastValue;
+		float leftOutLevel = leftOutFollower.lastValue;
+		float rightOutLevel = rightOutFollower.lastValue;
+		float leftOutBase = fclamp(inverse_lerp(0.0, 1.0, leftOutLevel), 0, 1);
+		float rightOutBase = fclamp(inverse_lerp(0.0, 1.0, rightOutLevel), 0, 1);
+		float leftOutSaturating = fclamp(inverse_lerp(0.9, 1.0, leftOutLevel), 0, 1);
+		float rightOutSaturating = fclamp(inverse_lerp(0.9, 1.0, rightOutLevel), 0, 1);
+		float leftOutFolding = fclamp(inverse_lerp(1.0, SELF_OSCILLATION_MAX, leftOutLevel), 0, 1);
+		float rightOutFolding = fclamp(inverse_lerp(1.0, SELF_OSCILLATION_MAX, rightOutLevel), 0, 1);
 		// input levels (purple)
-		hw.SetLed(LED_1, 0.5*leftInAvg, 0.0, leftInAvg);
-		hw.SetLed(LED_4, 0.5*rightInAvg, 0.0, rightInAvg);
-		// blend (cyan)
-		hw.SetLed(LED_2, 0.0, leftMid, leftMid);
-		hw.SetLed(LED_5, 0.0, rightMid, rightMid);
-		// output levels (green)
-		hw.SetLed(LED_3, 0.0, leftOutAvg, 0.25*leftOutAvg);
-		hw.SetLed(LED_6, 0.0, rightOutAvg, 0.25*rightOutAvg);
+		hw.SetLed(LED_1, 0.5*leftInLevel, 0.0, leftInLevel);
+		hw.SetLed(LED_4, 0.5*rightInLevel, 0.0, rightInLevel);
+		// blend (cyan to white)
+		float leftMid = (leftInLevel + leftOutBase) / 2;
+		float rightMid = (rightInLevel + rightOutBase) / 2;
+		hw.SetLed(LED_2, leftOutFolding, leftMid, leftMid);
+		hw.SetLed(LED_5, rightOutFolding, rightMid, rightMid);
+		// output levels (green to yellow to orange to red)
+		hw.SetLed(LED_3, leftOutSaturating, leftOutBase - leftOutFolding, 0.25*leftOutBase);
+		hw.SetLed(LED_6, rightOutSaturating, rightOutBase - rightOutFolding, 0.25*rightOutBase);
 		hw.WriteLeds();
 	}
 }

@@ -10,7 +10,7 @@ else
 fi
 
 cd Aurora-SDK
-./ci/build_libs.sh
+./ci/build_libs.sh || exit $?
 
 cd -
 make

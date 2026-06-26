@@ -31,6 +31,9 @@ OPT = -O3
 # For USB Flash Drive Access
 USE_FATFS = 1
 
+# for printing floats
+LDFLAGS += -u _printf_float
+
 # Core location, and generic Makefile.
 SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
 include $(SYSTEM_FILES_DIR)/Makefile
