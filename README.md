@@ -8,13 +8,22 @@ Instruments.
 
 ## About This Firmware
 
-As with the original HSO, a frequency can be set (Warp/Time), along with a
-stride (Reflect) and level (Atmosphere).  Stride indicates a multiplier factor
-for the distance between harmonics of the base frequency.  Level indicates a
-ratio between the relative amplitudes given to each of these frequencies.  Each
-input signal is filtered to include only the frequency components matching the
-frequency and stride controls, at levels determined by the level control and the
-number of the targeted harmonic.
+### Harmonic Shift Processing
+
+As with the original HSO (oscillator, not operator), a frequency can be set
+(Warp/Time), along with a stride (Reflect) and level (Atmosphere).  Stride
+indicates a multiplier factor for the distance between harmonics of the base
+frequency.  Level indicates a ratio between the relative amplitudes given to
+each of these frequencies.  The twist provide by this firmware is that each
+input signal is filtered to include only the frequency components matching
+the frequency and stride controls, at levels determined by the level control
+and the number of the targeted harmonic.
+
+To achieve this processing, each of the input signals is processed with an
+[FFT](https://en.wikipedia.org/wiki/Fast_Fourier_transform), to determine the
+frequencies that make up in the input.  Each of the target frequencies
+(determined by the set frequency and stride) is then scaled (based on the level
+and harmonic number) and all other frequency content is removed.
 
 As an example, say the left channel's input is a sum of five sine waves, at 300
 Hz, 400 Hz, 600 Hz, 800 Hz, and 1200 Hz.  Suppose frequency = 300 Hz,
@@ -24,22 +33,22 @@ plus an eighth-amplitude 1200 Hz wave, summed together.  However, if frequency
 is set to 100 Hz, stride is set to 3, and level is set to 1, the output will be
 only the full-amplitude 400 Hz wave (100 + 3*100).
 
+### Negative Stride for Sub-harmonics
+
 Unlike the original HSO, the stride control can go negative, in which case
 sub-harmonics are targeted, acting as a multiplier of divisions of the base
 frequency.  Given the example above, say frequency = 1200, stride = -1, and
 level = 0.25.  The output for would then be the full-amplitude 1200 Hz wave,
 a quarter-amplitude 600 Hz wave, and a sixteenth-amplitude 300 Hz wave.
 
-To achieve this processing, each of the input signals is processed with an
-[FFT](https://en.wikipedia.org/wiki/Fast_Fourier_transform), to determine the
-frequencies that make up in the input.  Each of the target frequencies
-(determined by the set frequency and stride) is then scaled (based on the level
-and harmonic number) and all other frequency content is removed.
+### Frequency (Warp/Time) Controls
 
 The frequency is controlled using coarse (Warp knob) and fine (Time knob)
 controls.  It can be modulated via exponential FM (Warp CV input, which tracks
 V/oct with a range of +5/-5 octaves), and linear FM (Time CV input, with a range
 of 20% of the frequency).
+
+### Resonance (Blur) Controls
 
 The resonance control (Blur), boosts the level of the base frequency components
 and, if level is above zero, proportionally boosts the following frequencies as
@@ -51,8 +60,30 @@ including the fundamental).  However, as the resonance is pushed further (or if
 the output level is higher due to also processing a signal, the output waves are
 then folded, leading to additional harmonics.
 
-With stride at 0 and level at 1, all frequencies above the frequency are passed,
-creating a kind of brick-wall high-pass filter.
+### Stride (Reflect) Controls
+
+The stride control (Reflect) ranges from 0 to 5, indicating the multiplier for
+subsequent harmonics.  With stride at 0 and level at 1, all frequencies above
+the frequency are passed, creating a kind of brick-wall high-pass filter.  When
+self-oscillating, the stacked oscillations are so close together that slow beat
+frequencies can be heard, leading to wobbling sound that can be adjusted with
+small changes to the knob position.
+
+With the CV input, Stride can modulated "through-zero" and become negative.
+This moves the targeted frequencies from above the base frequency and shifts
+them below it instead.  Particularly with level below 1, this creates a
+stationary central frequency as the other partials move around it.
+
+### Level (Atmosphere) Controls
+
+The level control ranges from 0 to 1 and sets the multiplier of the amplitude of
+successive partials, both for processing and self-oscillation.  At 0, no
+partials are considered, reducing the focus to a single frequency/FFT bin.  At
+1, all partials will be equally present.  Since anything below 1 will have an
+exponential falloff, the moment the value reached 1 can have a sudden effect
+when processing an input signal.
+
+### Reverse and Filter (Freeze) Controls
 
 The reverse button toggles between this standard mode and a reversed mode in
 which stride becomes negative and targets sub-harmonics instead.  With stride at
@@ -81,9 +112,13 @@ signal to the CV switches to the opposite state until the signal goes low again.
 These user-selected reverse and freeze states are also saved to the USB drive
 (assuming it is present) to a file called `HSO.txt`, and loaded on startup.
 
+### Mix Controls
+
 The mix control works as one might expect, fading from the dry signal (CCW) to
 the wet signal (CW).  Because the processing introduces a delay, the input signal
 is delayed by the same amount to ensure the signals being mixed are in-sync.
+
+### Shift Button
 
 A design goal for this firmware was to keep the interface as knob-per-function
 as possible.  However, this meant that the shift button was left unused.  But
@@ -107,6 +142,8 @@ SHIFT_DECAY | Decay stage time in seconds. | 1.9
 SHIFT_CURVE | Envelope curve, -100 to 100. | -5
 SHIFT_GAIN | Total gain increase at maximum envelope value. | 5
 SHIFT_OFFSET | Maximum offset applied to each channel. | 0.5
+
+### LEDs
 
 Finally the front-panel LEDs show estimates of the signal levels.  The left
 channel LEDs are along the top, while the right channel LEDs are along the
