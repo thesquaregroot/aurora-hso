@@ -6,6 +6,9 @@ Electronix, inspired by the [Harmonic Shift
 Oscillator](https://nsinstruments.com/modules/HSO.html) by New Systems
 Instruments.
 
+A sound demo showing off some of the use-cases for this firmware can be found
+[here](https://soundcloud.com/thesquaregroot/harmonic-shift-operator-firmware-sound-demo).
+
 ## About This Firmware
 
 ### Harmonic Shift Processing
