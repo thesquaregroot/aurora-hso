@@ -33,14 +33,6 @@ plus an eighth-amplitude 1200 Hz wave, summed together.  However, if frequency
 is set to 100 Hz, stride is set to 3, and level is set to 1, the output will be
 only the full-amplitude 400 Hz wave (100 + 3*100).
 
-### Negative Stride for Sub-harmonics
-
-Unlike the original HSO, the stride control can go negative, in which case
-sub-harmonics are targeted, acting as a multiplier of divisions of the base
-frequency.  Given the example above, say frequency = 1200, stride = -1, and
-level = 0.25.  The output for would then be the full-amplitude 1200 Hz wave,
-a quarter-amplitude 600 Hz wave, and a sixteenth-amplitude 300 Hz wave.
-
 ### Frequency (Warp/Time) Controls
 
 The frequency is controlled using coarse (Warp knob) and fine (Time knob)
@@ -68,6 +60,14 @@ the frequency are passed, creating a kind of brick-wall high-pass filter.  When
 self-oscillating, the stacked oscillations are so close together that slow beat
 frequencies can be heard, leading to wobbling sound that can be adjusted with
 small changes to the knob position.
+
+#### Negative Stride and Through-Zero Modulation
+
+Unlike the original HSO, the stride control can go negative, in which case
+sub-harmonics are targeted, acting as a multiplier of divisions of the base
+frequency.  Given the example above, say frequency = 1200, stride = -1, and
+level = 0.25.  The output for would then be the full-amplitude 1200 Hz wave,
+a quarter-amplitude 600 Hz wave, and a sixteenth-amplitude 300 Hz wave.
 
 With the CV input, Stride can modulated "through-zero" and become negative.
 This moves the targeted frequencies from above the base frequency and shifts
