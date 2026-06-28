@@ -134,6 +134,8 @@ primary use of this is to trigger a manual percussive hit which, depending on
 the settings, can range from soft and bell-like to harsh and noisy.  It can also
 be useful in a feedback loop to give the system a kick after it has died off.
 
+#### Changing Envelope Settings
+
 The envelope settings can be edited using the file `HSO.txt`.  This will be
 automatically created to track the reverse/freeze settings of the last run, but
 the following properties can be added to edit the shift envelope:
@@ -145,6 +147,8 @@ SHIFT_DECAY | Decay stage time in seconds. | 1.9
 SHIFT_CURVE | Envelope curve, -100 (exp) to 100 (log). | -5
 SHIFT_GAIN | Total gain increase at maximum envelope value. | 5
 SHIFT_OFFSET | Maximum offset applied to each channel. | 0.5
+
+#### Envelope Settings Mode
 
 For convenience, it is also possible to change the settings using the shift
 button itself.  Holding the shift button for more the 0.5 seconds will cause the
@@ -172,6 +176,15 @@ changing.
 Once the knobs are turned while not in envelope settings mode, the adjusted
 parameter will immediately jump to the new knob position and continue to track
 it from there as normal.
+
+#### Envelope Reset
+
+Pressing the reverse button while in envelope settings mode will reset all
+envelope settings to their default values, immediately exit the envelope
+settings mode, and return to normal operation with the parameters all moved to
+the current knob positions.  The LEDs will immediately change colors to indicate
+this, even if shift is still held.  The shift button will need to be released
+and then pressed again order to trigger the envelope or change the settings.
 
 ### LEDs
 

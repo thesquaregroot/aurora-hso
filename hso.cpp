@@ -229,6 +229,7 @@ float shiftEnvelopeCurve = DEFAULT_SHIFT_ENVELOPE_CURVE;
 #define SHIFT_SETTINGS_DELAY_MS 500
 #define SHIFT_KNOB_EPSILON 0.01
 bool isChangingShiftSettings = false;
+bool didShiftReset = false;
 float lastSettingLevel = 0.0;
 // array index by ControlKnobs enum (KNOB_TIME, etc.)
 bool hasChangedKnob[KNOB_LAST] = {0};
@@ -511,7 +512,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	if (shiftButton->RisingEdge()) {
 		shiftEnvelope.Trigger();
 	}
-	else {
+	else if (shiftButton->FallingEdge()) {
+		didShiftReset = false;
+	}
+	else if (!didShiftReset) {
 		bool wasChangingShiftSettings = isChangingShiftSettings;
 		isChangingShiftSettings = shiftButton->Pressed() && shiftButton->TimeHeldMs() > SHIFT_SETTINGS_DELAY_MS;
 		if (!wasChangingShiftSettings && isChangingShiftSettings) {
@@ -539,6 +543,15 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			shiftEnvelopeAttack = DEFAULT_SHIFT_ENVELOPE_ATTACK;
 			shiftEnvelopeDecay = DEFAULT_SHIFT_ENVELOPE_DECAY;
 			shiftEnvelopeCurve = DEFAULT_SHIFT_ENVELOPE_CURVE;
+			for (int i=0; i<KNOB_LAST; i++) {
+				// NOTE: this will reset the envelope settings and also force the standard
+				//       parameters to the current knob positions.
+				hasChangedKnob[i] = false;
+				knobStartPosition[i] = hw.GetKnobValue(i);
+			}
+			// since the parameters will get updated, exit settings mode
+			isChangingShiftSettings = false;
+			didShiftReset = true;
 		}
 		else {
 			isReverseInverted = !isReverseInverted;
