@@ -226,6 +226,15 @@ float shiftEnvelopeAttack = DEFAULT_SHIFT_ENVELOPE_ATTACK;
 float shiftEnvelopeDecay = DEFAULT_SHIFT_ENVELOPE_DECAY;
 float shiftEnvelopeCurve = DEFAULT_SHIFT_ENVELOPE_CURVE;
 
+#define SHIFT_SETTINGS_DELAY_MS 500
+#define SHIFT_KNOB_EPSILON 0.01
+bool isChangingShiftSettings = false;
+float lastSettingLevel = 0.0;
+// array index by ControlKnobs enum (KNOB_TIME, etc.)
+bool hasChangedKnob[KNOB_LAST] = {0};
+float knobStartPosition[KNOB_LAST] = {0};
+float knobEndPosition[KNOB_LAST] = {0};
+
 // variables for DFT
 DTCMRAM ShyFFT<dft_t, DFT_SIZE> dft;
 DTCMRAM dft_t window[DFT_SIZE];
@@ -385,9 +394,12 @@ void processSignals(float baseFrequency, float strideFactor, float levelFactor, 
 	}
 	else {
 		float baseLevel = 1.0 + 4.0f * resonance;
-		// due to noisy controls, and the fact that crossing zero for processing can have
-		// a pretty drastic/sudden effect, this adds some buffer depending on the mode
+		// due to the fact that crossing zero for processing can have a pretty
+		// drastic/sudden effect, this adds some buffer depending on the mode
 		// to minimize the likelihood of switching directions unexpectedly
+		//
+		// NOTE: at this point, strideFactor is already negative if reverse is active, so we're essentially
+		//			following the reverse state when the value is close to 0
 		bool isStrideNegative = isReverseActive ? (strideFactor < STRIDE_EPSILON) : (strideFactor < -STRIDE_EPSILON);
 
 		// since some of the calculations below require dividing by the stride
@@ -447,6 +459,47 @@ inline dft_t limit(dft_t value) {
 	return cubicSineFold(value);
 }
 
+inline bool fequals(const float a, const float b, const float epsilon) {
+	return fabsf(a - b) < epsilon;
+}
+
+// In normal operation, gets the new knob position of the provided knob index and returns it.
+//
+// If we are changing shift settings, translates the given knob position into the provided shift value range,
+// tracking whether the knob has been changed, and updating the target variable in settingValue (passed by
+// reference).
+//
+// Once we are no long changing settings, retains the last updated knob value until the knob is changed again
+// at which point we return to tracking the knob as normal.
+float updateKnobPosition(int knobIndex, float& settingValue, float rangeMin, float rangeMax) {
+	float knobPosition = hw.GetKnobValue(knobIndex);
+	if (!isChangingShiftSettings) {
+		if (!hasChangedKnob[knobIndex]) {
+			return knobPosition;
+		}
+		// value was changed when adjusting shift settings
+		if (!fequals(knobPosition, knobEndPosition[knobIndex], SHIFT_KNOB_EPSILON)) {
+			// knob has been moved again, switch to tracking knob again
+			hasChangedKnob[knobIndex] = false;
+			return knobPosition;
+		}
+		// knob is still in last settings-change location, keep starting value
+		return knobStartPosition[knobIndex];
+	}
+	if (hasChangedKnob[knobIndex] || !fequals(knobPosition, knobStartPosition[knobIndex], SHIFT_KNOB_EPSILON)) {
+		float newValue = fmap(knobPosition, rangeMin, rangeMax);
+		float rangeEpsilon = SHIFT_KNOB_EPSILON * (rangeMax - rangeMin);
+		if (!fequals(settingValue, newValue, rangeEpsilon)) {
+			settingValue = newValue;
+			hasChangedKnob[knobIndex] = true;
+			// update globals
+			lastSettingLevel = newValue / rangeMax; // retains sign but normalizes to 1 (assuming rangeMax is positive and has large magnitude than rangeMin)
+			isConfigChanged = true;
+		}
+	}
+	return knobStartPosition[knobIndex];
+}
+
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size) {
 #if LOG_ENABLED
 	// get start of overall callback and first section
@@ -455,16 +508,46 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 #endif
 	hw.ProcessAllControls();
 
+	if (shiftButton->RisingEdge()) {
+		shiftEnvelope.Trigger();
+	}
+	else {
+		bool wasChangingShiftSettings = isChangingShiftSettings;
+		isChangingShiftSettings = shiftButton->Pressed() && shiftButton->TimeHeldMs() > SHIFT_SETTINGS_DELAY_MS;
+		if (!wasChangingShiftSettings && isChangingShiftSettings) {
+			// record current knob positions so we know if they move
+			// however, we don't want to change start position if we're still preserving a previous state
+			for (int i=0; i<KNOB_LAST; i++) {
+				if (!hasChangedKnob[i]) {
+					knobStartPosition[i] = hw.GetKnobValue(i);
+				}
+			}
+			lastSettingLevel = 1.0; // for LED display
+		}
+		else if (wasChangingShiftSettings && !isChangingShiftSettings) {
+			for (int i=0; i<KNOB_LAST; i++) {
+				knobEndPosition[i] = hw.GetKnobValue(i);
+			}
+		}
+	}
+
 	if (reverseButton->RisingEdge()) {
-		isReverseInverted = !isReverseInverted;
+		if (isChangingShiftSettings) {
+			// reset
+			shiftEnvelopeGain = DEFAULT_SHIFT_ENVELOPE_GAIN;
+			shiftEnvelopeOffset = DEFAULT_SHIFT_ENVELOPE_OFFSET;
+			shiftEnvelopeAttack = DEFAULT_SHIFT_ENVELOPE_ATTACK;
+			shiftEnvelopeDecay = DEFAULT_SHIFT_ENVELOPE_DECAY;
+			shiftEnvelopeCurve = DEFAULT_SHIFT_ENVELOPE_CURVE;
+		}
+		else {
+			isReverseInverted = !isReverseInverted;
+		}
 		isConfigChanged = true;
 	}
 	if (freezeButton->RisingEdge()) {
 		isFreezeInverted = !isFreezeInverted;
 		isConfigChanged = true;
-	}
-	if (shiftButton->RisingEdge()) {
-		shiftEnvelope.Trigger();
 	}
 
 	bool reverseGateState = hw.GetGateState(GATE_REVERSE);
@@ -473,9 +556,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	isFreezeActive = isFreezeInverted ? !freezeGateState : freezeGateState;
 
 	// Warp Knob - coarse frequency
-	float baseFrequency = fmap(hw.GetKnobValue(KNOB_WARP), FREQUENCY_MIN, FREQUENCY_MAX, Mapping::LOG);
+	float warpKnobValue = hw.GetKnobValue(KNOB_WARP);
+	float baseFrequency = fmap(warpKnobValue, FREQUENCY_MIN, FREQUENCY_MAX, Mapping::LOG);
 	// Time Knob - fine frequency (10% range of base)
-	baseFrequency += 0.1 * baseFrequency * fmap(hw.GetKnobValue(KNOB_TIME), -1.0, 1.0);
+	float timeKnobValue = updateKnobPosition(KNOB_TIME, shiftEnvelopeOffset, 0.0, 1.0);
+	baseFrequency += 0.1 * baseFrequency * fmap(timeKnobValue, -1.0, 1.0);
 	// Time CV - linear FM (20% range of post-fine-adjustment freq)
 	baseFrequency += 0.2 * baseFrequency * hw.GetCvValue(CV_TIME);
 	// Warp CV - exponential FM
@@ -483,7 +568,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	baseFrequency = fclamp(baseFrequency, HARMONIC_DROP_LOW, HARMONIC_DROP_HIGH);
 
 	// Blur Knob/CV - resonance
-	float rawResonance = hw.GetKnobValue(KNOB_BLUR) + hw.GetCvValue(CV_BLUR);
+	float blurKnobValue = updateKnobPosition(KNOB_BLUR, shiftEnvelopeGain, 1.0, 10.0);
+	float rawResonance = blurKnobValue + hw.GetCvValue(CV_BLUR);
 	float resonance = fclamp(rawResonance, 0.0, 1.5);
 	// Scale resonance after cutoff for self-oscillation, for example:
 	//		Max knob only:     (1.0 - 0.5) / (1.0 - 0.5) = 1.0
@@ -493,15 +579,25 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	selfOscillation = fclamp(SELF_OSCILLATION_MAX / 2 * selfOscillation, 0.0, SELF_OSCILLATION_MAX);
 
 	// Reflect Knob/CV - stride
-	float rawStride = hw.GetKnobValue(KNOB_REFLECT) + hw.GetCvValue(CV_REFLECT);
+	float reflectKnobValue = updateKnobPosition(KNOB_REFLECT, shiftEnvelopeAttack, 0.1, 10.0);
+	float rawStride = reflectKnobValue + hw.GetCvValue(CV_REFLECT);
 	float strideFactor = (isReverseActive ? -5.0 : 5.0) * rawStride;
 
 	// Atmosphere Knob/CV - level
-	float rawLevel = hw.GetKnobValue(KNOB_ATMOSPHERE) + hw.GetCvValue(CV_ATMOSPHERE);
+	float atmosphereKnobValue = updateKnobPosition(KNOB_ATMOSPHERE, shiftEnvelopeDecay, 0.1, 10.0);
+	float rawLevel = atmosphereKnobValue + hw.GetCvValue(CV_ATMOSPHERE);
 	float levelFactor = fmap(rawLevel, 0.0, 1.0, Mapping::LINEAR);
 
 	// Mix Knob/CV - mix
-	float mix = fclamp(hw.GetKnobValue(KNOB_MIX) + hw.GetCvValue(CV_MIX), 0.0, 1.0);
+	float mixKnobValue = updateKnobPosition(KNOB_MIX, shiftEnvelopeCurve, -20.0, 20.0);
+	float mix = fclamp(mixKnobValue + hw.GetCvValue(CV_MIX), 0.0, 1.0);
+
+	// update envelope settings
+	if (isChangingShiftSettings) {
+		shiftEnvelope.SetTime(ADENV_SEG_ATTACK, shiftEnvelopeAttack);
+		shiftEnvelope.SetTime(ADENV_SEG_DECAY, shiftEnvelopeDecay);
+		shiftEnvelope.SetCurve(shiftEnvelopeCurve);
+	}
 
 	// Collect input signals
 	for (size_t i = 0; i < size; i++) {
@@ -658,22 +754,22 @@ bool loadConfig() {
 			isFreezeInverted = atoi(value.c_str()) > 0;
 		}
 		else if (key == CONFIG_SHIFT_ATTACK) {
-			shiftEnvelopeAttack = atof(value.c_str());
+			shiftEnvelopeAttack = fclamp(atof(value.c_str()), 0.001, 3600.0);
 			shiftEnvelope.SetTime(ADENV_SEG_ATTACK, shiftEnvelopeAttack);
 		}
 		else if (key == CONFIG_SHIFT_DECAY) {
-			shiftEnvelopeDecay = atof(value.c_str());
+			shiftEnvelopeDecay = fclamp(atof(value.c_str()), 0.001, 3600.0);
 			shiftEnvelope.SetTime(ADENV_SEG_DECAY, shiftEnvelopeDecay);
 		}
 		else if (key == CONFIG_SHIFT_CURVE) {
-			shiftEnvelopeCurve = atof(value.c_str());
+			shiftEnvelopeCurve = fclamp(atof(value.c_str()), -100.0, 100.0);
 			shiftEnvelope.SetCurve(shiftEnvelopeCurve);
 		}
 		else if (key == CONFIG_SHIFT_GAIN) {
-			shiftEnvelopeGain = atof(value.c_str());
+			shiftEnvelopeGain = fclamp(atof(value.c_str()), 1.0, 100.0);
 		}
 		else if (key == CONFIG_SHIFT_OFFSET) {
-			shiftEnvelopeOffset = atof(value.c_str());
+			shiftEnvelopeOffset = fclamp(atof(value.c_str()), -10.0, 10.0);
 		}
 	}
 	f_close(&file);
@@ -779,32 +875,46 @@ int main(void) {
 			}
 #endif
 		}
-		// Button LEDs
-		hw.SetLed(LED_REVERSE, isReverseActive ? colorWhite : colorOff);
-		hw.SetLed(LED_FREEZE, isFreezeActive ? colorWhite : colorOff);
-		// Signal LEDs
 
-		float leftInLevel = leftInFollower.lastValue;
-		float rightInLevel = rightInFollower.lastValue;
-		float leftOutLevel = leftOutFollower.lastValue;
-		float rightOutLevel = rightOutFollower.lastValue;
-		float leftOutBase = fclamp(inverse_lerp(0.0, 1.0, leftOutLevel), 0, 1);
-		float rightOutBase = fclamp(inverse_lerp(0.0, 1.0, rightOutLevel), 0, 1);
-		float leftOutSaturating = fclamp(inverse_lerp(0.9, 1.0, leftOutLevel), 0, 1);
-		float rightOutSaturating = fclamp(inverse_lerp(0.9, 1.0, rightOutLevel), 0, 1);
-		float leftOutFolding = fclamp(inverse_lerp(1.0, SELF_OSCILLATION_MAX, leftOutLevel), 0, 1);
-		float rightOutFolding = fclamp(inverse_lerp(1.0, SELF_OSCILLATION_MAX, rightOutLevel), 0, 1);
-		// input levels (purple)
-		hw.SetLed(LED_1, 0.5*leftInLevel, 0.0, leftInLevel);
-		hw.SetLed(LED_4, 0.5*rightInLevel, 0.0, rightInLevel);
-		// blend (cyan to white)
-		float leftMid = (leftInLevel + leftOutBase) / 2;
-		float rightMid = (rightInLevel + rightOutBase) / 2;
-		hw.SetLed(LED_2, leftOutFolding, leftMid, leftMid);
-		hw.SetLed(LED_5, rightOutFolding, rightMid, rightMid);
-		// output levels (green to yellow to orange to red)
-		hw.SetLed(LED_3, leftOutSaturating, leftOutBase - leftOutFolding, 0.25*leftOutBase);
-		hw.SetLed(LED_6, rightOutSaturating, rightOutBase - rightOutFolding, 0.25*rightOutBase);
+		if (isChangingShiftSettings) {
+			float redCoef = lastSettingLevel > 0 ? 1.0 : -0.5;
+			float blueCoef = lastSettingLevel > 0 ? 0.5 : -1.0;
+			float red = redCoef * lastSettingLevel;
+			float blue = blueCoef * lastSettingLevel;
+			hw.SetLed(LED_1, red, 0, blue);
+			hw.SetLed(LED_2, red, 0, blue);
+			hw.SetLed(LED_3, red, 0, blue);
+			hw.SetLed(LED_4, red, 0, blue);
+			hw.SetLed(LED_5, red, 0, blue);
+			hw.SetLed(LED_6, red, 0, blue);
+		} else {
+			// Button LEDs
+			hw.SetLed(LED_REVERSE, isReverseActive ? colorWhite : colorOff);
+			hw.SetLed(LED_FREEZE, isFreezeActive ? colorWhite : colorOff);
+			// Signal LEDs
+
+			float leftInLevel = leftInFollower.lastValue;
+			float rightInLevel = rightInFollower.lastValue;
+			float leftOutLevel = leftOutFollower.lastValue;
+			float rightOutLevel = rightOutFollower.lastValue;
+			float leftOutBase = fclamp(inverse_lerp(0.0, 1.0, leftOutLevel), 0, 1);
+			float rightOutBase = fclamp(inverse_lerp(0.0, 1.0, rightOutLevel), 0, 1);
+			float leftOutSaturating = fclamp(inverse_lerp(0.9, 1.0, leftOutLevel), 0, 1);
+			float rightOutSaturating = fclamp(inverse_lerp(0.9, 1.0, rightOutLevel), 0, 1);
+			float leftOutFolding = fclamp(inverse_lerp(1.0, SELF_OSCILLATION_MAX, leftOutLevel), 0, 1);
+			float rightOutFolding = fclamp(inverse_lerp(1.0, SELF_OSCILLATION_MAX, rightOutLevel), 0, 1);
+			// input levels (purple)
+			hw.SetLed(LED_1, 0.5*leftInLevel, 0.0, leftInLevel);
+			hw.SetLed(LED_4, 0.5*rightInLevel, 0.0, rightInLevel);
+			// blend (cyan to white)
+			float leftMid = (leftInLevel + leftOutBase) / 2;
+			float rightMid = (rightInLevel + rightOutBase) / 2;
+			hw.SetLed(LED_2, leftOutFolding, leftMid, leftMid);
+			hw.SetLed(LED_5, rightOutFolding, rightMid, rightMid);
+			// output levels (green to yellow to orange to red)
+			hw.SetLed(LED_3, leftOutSaturating, leftOutBase - leftOutFolding, 0.25*leftOutBase);
+			hw.SetLed(LED_6, rightOutSaturating, rightOutBase - rightOutFolding, 0.25*rightOutBase);
+		}
 		hw.WriteLeds();
 	}
 }

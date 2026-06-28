@@ -142,9 +142,36 @@ Setting | Description | Default Value
 --- | --- | ---
 SHIFT_ATTACK | Attack stage time in seconds. | 0.1
 SHIFT_DECAY | Decay stage time in seconds. | 1.9
-SHIFT_CURVE | Envelope curve, -100 to 100. | -5
+SHIFT_CURVE | Envelope curve, -100 (exp) to 100 (log). | -5
 SHIFT_GAIN | Total gain increase at maximum envelope value. | 5
 SHIFT_OFFSET | Maximum offset applied to each channel. | 0.5
+
+For convenience, it is also possible to change the settings using the shift
+button itself.  Holding the shift button for more the 0.5 seconds will cause the
+module to enter an envelope settings mode, indicated by all LEDs becoming pink.
+Continue holding the shift button and adjust the knobs to change the envelope
+settings (see table below).  Once the knob is turned the LEDs will begin to
+track the currently edited setting value, pink for positive values, off for
+zero, and purple for negative values.
+
+Setting | Knob | Min | Max
+--- | --- | --- | ---
+Attack (seconds) | Reflect | 0.1 | 10
+Decay (seconds) | Atmosphere | 0.1 | 10
+Curve | Mix | -20 | 20
+Gain | Blur | 1.0 | 10.0
+Offset | Time | 0.0 | 1.0
+
+While the settings are being changed, the previously set parameters for normal
+processing will be preserved.  These values will be preserved until the knob is
+next adjusted when not in the envelope settings mode.  This means the shift
+button can be pressed to trigger the envelope, the shift button can be held to
+change the parameters again, and so forth, without the standard parameters
+changing.
+
+Once the knobs are turned while not in envelope settings mode, the adjusted
+parameter will immediately jump to the new knob position and continue to track
+it from there as normal.
 
 ### LEDs
 
